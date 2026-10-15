@@ -1,598 +1,756 @@
 from pathlib import Path
 import numpy as np
 import time
-from kinematics.animation import machine1_to_plot, machine2_to_plot, inverse_kinematic
-from conflict_detect.collision_utils import segments_intersect, segment_intersects_circle, point_in_quad, rectangles_intersect, extract_xy, xy_points_after_m107, write_sim_file, sim_one_p1, sim_p1, sim_one_p2, sim_p2
-from util.network_utils import run_netsh, current_wifi, tcp_reachable, reconnect_to_ambots
+
+from conflict_detect.collision_utils import (
+    segments_intersect, segment_intersects_circle, point_in_quad,
+    rectangles_intersect, extract_xy, xy_points_after_m107,
+    write_sim_file, sim_one_px, sim_px,
+)
+from .execution import execution_worker, RECOVERY_TIMEOUT
 import requests
 import random
 import queue
 import multiprocessing as mp
-import traceback
+
 from shapely import Polygon
 from shapely.ops import unary_union
-
-# run_netsh("disconnect", f'interface=Wi-Fi') --> this will disrupt the connection on purpose
-
+import ast
 
 
+from shapely.geometry import Polygon, mapping
 
-def get_status(retries=5):
-    url1 = "http://192.168.0.15/rr_status"
-    url2 = "http://192.168.0.16/rr_status"
-    for attempt in range(retries):
-        try:
-            r1 = requests.get(url1, params={"type": 0}, timeout=5)
-            r1.raise_for_status()
-            r2 = requests.get(url2, params={"type": 0}, timeout=5)
-            r2.raise_for_status()
+from shapely.validation import explain_validity
 
-            data1 = r1.json()
-            data2 = r2.json()
 
-            s1 = data1["status"]
-            cm1 = data1["coords"]["machine"]
-            s2 = data2["status"]
-            cm2 = data2["coords"]["machine"]
 
-            if s1 is None or cm1 is None or s2 is None or cm2 is None:
-                continue
 
- 
-            return [[s1, s2],[cm1, cm2]]
-        except (requests.exceptions.RequestException, ConnectionError) as error:
-            print(f'{attempt} attempt to reconnect')
-            rec = reconnect_to_ambots()
-            
-            if rec:
-                continue
-            else:
-                raise
+import queue, time, uuid, traceback
+from pathlib import Path
 
-    raise ConnectionError(
-        f"Could not obtain valid status from both printers after {retries} attempts"
+from collections import deque
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+PHYSICAL_BOUNDS = {
+    1: dict(
+        elbow_joint_f=26,
+        elbow_joint_b=-26,
+        distal_arm_f=246,
+        distal_arm_b=-26,
+        prox_joint_f=8,
+        prox_joint_b=-8,
+        proximal_arm_f=230,
+        proximal_arm_b=-8,
+    ),
+    2: dict(
+        elbow_joint_f=-25,
+        elbow_joint_b=25,
+        distal_arm_f=253,
+        distal_arm_b=-25,
+        prox_joint_f=8,
+        prox_joint_b=-8,
+        proximal_arm_f=234,
+        proximal_arm_b=-8,
+    ),
+    3: dict(
+            elbow_joint_f=-25,
+            elbow_joint_b=25,
+            distal_arm_f=253,
+            distal_arm_b=-25,
+            prox_joint_f=8,
+            prox_joint_b=-8,
+            proximal_arm_f=234,
+            proximal_arm_b=-8,
+    )
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+# def pick_command_px(p, printer, excluded=None):
+#     """
+#     PROPOSAL ONLY.
+
+#     Does not:
+#       - change A -> N
+#       - write order.txt
+
+#     Those things happen only after simulation accepts the candidate.
+#     """
+#     excluded = set() if excluded is None else set(excluded)
+
+
+#     #no mutatoin of printer[p].codes because
+#     available = [
+#         code
+#         for code, value in printer[p].codes.items()
+#         if value[0] == "A" and code not in excluded
+#     ]
+
+#     if not available:
+#         return None
+
+
+
+#     return random.choice(available)
+
+
+# def pick_command_px(p, printer, excluded=None):
+#     """
+#     PROPOSAL ONLY.
+
+#     Does not:
+#       - change A -> N
+#       - write order.txt
+
+#     Those things happen only after simulation accepts the candidate.
+#     """
+#     excluded = set() if excluded is None else set(excluded)
+
+
+#     #no mutatoin of printer[p].codes because
+#     available = [
+#         code
+#         for code, value in printer[p].codes.items()
+#         if value[0] == "A" and code not in excluded
+#     ]
+
+#     if not available:
+#         return None
+
+
+
+#     return random.choice(available)
+
+
+def pick_command_px(p, printer, store_coords, b, excluded=None):
+    print(b)
+    """
+    Propose the nearest available command that is not excluded.
+    Does not modify availability, coordinates, or exclusions.
+    """
+    excluded = set() if excluded is None else set(excluded)
+    if b:
+        cur_x, cur_y = printer[p].prox_join[0], printer[p].prox_join[1]
+    else:
+        cur_x, cur_y = store_coords[p]
+    nearest_code = None
+    nearest_distance_squared = float("inf")
+
+    for code, (availability, points) in printer[p].codes.items():
+        if availability != "A" or code in excluded:
+            continue
+
+        if len(points) == 0:
+            raise ValueError(f"p{p}: {code} has no stored coordinates")
+
+        # Distance to this command's closest listed point.
+        # Squared distances preserve nearest-first ordering.
+        distance_squared = min(
+            (x - cur_x) ** 2 + (y - cur_y) ** 2
+            for x, y in points
+        )
+
+        if distance_squared < nearest_distance_squared:
+            nearest_code = code
+            nearest_distance_squared = distance_squared
+
+    return nearest_code
+
+
+
+def _try_send_sim_frame(simulation_queue, message):
+    if simulation_queue is None:
+        return
+
+    try:
+        simulation_queue.put_nowait(message)
+        return True
+    except queue.Full:
+        # The optional visualization is allowed to drop frames.
+        # Collision computation must never depend on GUI speed.
+        return False
+
+
+def _validated_arm_bounds(px, x, y, physical_bounds, context):
+    """Validate the returned corners before using them in collision geometry.
+
+    boundary_points must already return perimeter-ordered corners in the same
+    common coordinate frame for every printer. Do not guess a transform or
+    repair a crossing polygon, because that could hide a geometry error.
+    """
+    boundary = px.boundary_points(x, y, **physical_bounds)
+    corners = {}
+    polygons = []
+    for arm in ("distal", "proximal"):
+        points = np.asarray(boundary[arm], dtype=float)
+        if points.shape != (4, 2) or not np.isfinite(points).all():
+            raise ValueError(
+                f"{context}: invalid {arm} corners at raw position {(x, y)}: "
+                f"{points.tolist()}"
+            )
+        polygon = Polygon(points)
+        if not polygon.is_valid or polygon.area <= 0:
+            raise ValueError(
+                f"{context}: invalid {arm} polygon at raw position {(x, y)}; "
+                f"{explain_validity(polygon)}; corners={points.tolist()}. "
+                "Check boundary_points() corner order."
+            )
+        corners[arm] = tuple(map(tuple, points.tolist()))
+        polygons.append(polygon)
+    return corners, polygons
+
+
+
+def polygon_at_position(p, printer, raw_position):
+    x, y = map(float, raw_position)
+
+    _, arm_polygons = _validated_arm_bounds(
+        printer[p], x, y, PHYSICAL_BOUNDS[p],
+        f"p{p}: observed position",
     )
 
+    return unary_union(arm_polygons)
+
+
+def simulate_candidate(
+    p,
+    candidate,
+    printer,
+    store_coords,
+    config,
+    simulation_queue=None,
+    visualization_delay=0.0,
+):
+    """
+    Speculatively replay one candidate without changing real store_coords.
+
+    Returns:
+        candidate_polygon
+        candidate_final_coords
+
+    candidate_polygon is the swept occupied area for printer p during
+    the candidate simulation.
+
+    candidate_final_coords is a COPY of store_coords containing the final
+    simulated coordinate for p.
+    """
+    local_coords = {q: tuple(position) for q, position in store_coords.items()}
+
+    command = config.out_px[p] / candidate
+
+    arm_bounds, initial_polygons = _validated_arm_bounds(
+        printer[p], *local_coords[p], PHYSICAL_BOUNDS[p],
+        f"p{p}:{candidate}, initial pose",
+    )
+    rectangles = list(initial_polygons)
+    frame_count = 0
+
+
+    _try_send_sim_frame(
+        simulation_queue,
+        {
+            "type": "start",
+            "printer": p,
+            "gcode": candidate,
+            "positions": dict(local_coords),
+            "arm_bounds": arm_bounds,
+            "physical_bounds": PHYSICAL_BOUNDS,
+        },
+    )
+
+    with open(command, "r") as r:
+        print(command)
+        for line_number, line in enumerate(r, start=1):
+            if not line.strip():
+                continue
+            frame = ast.literal_eval(line.strip())
+
+            if not isinstance(frame, list) or len(frame) < 2:
+                raise ValueError(f"Invalid simulation frame: {frame}")
+
+            *positions, moved_printer = frame
+            moved_printer = int(moved_printer)
+
+            if len(positions) != len(printer):
+                raise ValueError(
+                    f"Expected {len(printer)} positions, got {len(positions)}"
+                )
+
+            # For this candidate file, p should be the moving printer.
+            # If not, reject the malformed simulation file immediately.
+            if moved_printer != p:
+                raise ValueError(
+                    f"{command} says p{moved_printer} moved while "
+                    f"simulating p{p}"
+                )
+
+            # The file's other-printer positions are generation-time snapshots.
+            # Keep their supplied telemetry positions; only this candidate moves.
+            if set(printer) != set(range(1, len(positions) + 1)):
+                raise ValueError("Simulation files require printer IDs 1..N")
+            x, y = positions[p - 1]
+            local_coords[p] = (float(x), float(y))
+            print(f'local_coords: {local_coords}')
+
+            cur_x_raw, cur_y_raw = local_coords[p]
+
+            arm_bounds, arm_polygons = _validated_arm_bounds(
+                printer[p], cur_x_raw, cur_y_raw, PHYSICAL_BOUNDS[p],
+                f"p{p}:{candidate}, line {line_number}",
+            )
+            rectangles.extend(arm_polygons)
+            frame_count += 1
+
+            _try_send_sim_frame(
+                simulation_queue,
+                {
+                    "type": "frame",
+                    "printer": p,
+                    "gcode": candidate,
+                    "positions": dict(local_coords),
+                    "arm_bounds": arm_bounds,
+                    "physical_bounds": PHYSICAL_BOUNDS,
+                },
+            )
+            
+            if visualization_delay > 0.0:
+                time.sleep(visualization_delay)
+
+    if frame_count == 0:
+        raise ValueError(
+            f"No simulated occupied geometry generated for {command}"
+        )
+
+    
+    return unary_union(rectangles), local_coords
 
 
 
+def collides_with_stored(candidate_polygon, p, store_polygons):
+    """
+    Skip printers whose polygon is still None, as requested.
+    """
+    collisions = {}
+
+    for other_p, other_polygon in store_polygons.items():
+        if other_p == p or other_polygon is None:
+            continue
+
+        overlap = candidate_polygon.intersection(other_polygon)
+        if not overlap.is_empty:
+            collisions[other_p] = overlap.area
+
+    return collisions
 
 
+def mark_gcode_unavailable(candidate, printer):
+    """
+    Once accepted, the same physical region becomes unavailable to every
+    printer that has that code.
+    """
+    for px in printer.values():
+        if candidate in px.codes:
+            px.codes[candidate][0] = "N"
+
+def command_script(printer, config, store_coords, tracker_event_queue,
+                   execution_request_queue, execution_result_queue,
+                   tracker_control_queue, printing_queue, stop_requested,
+                   execution_finished, error_queue, simulation_queue=None,
+                   stage="m", store_polygons = None):
+    
+    path = Path(r"C:\Users\nural\python2")
+    if store_polygons is None:
+        raise ValueError("Pass the shared store_polygons dictionary")
+
+    count = {
+        1: 1,
+        2: 1,
+        3: 1
+    }
+
+    try:
+        ip = {1:'192.168.0.15',
+              2: '192.168.0.16'}
 
 
-def collision_exec(p, position_queue1, position_queue2, coords_list, collision_pre_pause, collision_post_pause, post_switch, pre_switch):
-    post_switch.set()
-    pre_switch.clear()
-    if p == 1:
-        ip = '192.168.0.15'
-    if p == 2:
-        ip = '192.168.0.16'
+        if stage not in {"b", "m", "e"}:
+            raise ValueError("stage must be b, m, or e")
 
-
-    path_points = [
-    [(150, 150), (150, 300), 1],
-    [(150, 144), (150, 300), 1],
-    [(150, 138), (150, 300), 1],
-    [(150, 132), (150, 300), 1],
-    [(152, 120), (150, 300), 1],
-    [(154, 114), (150, 300), 1],
-    [(156, 108), (150, 300), 1],
-    [(165, 102), (150, 300), 1],
-    [(174, 96), (150, 300), 1],
-    [(180, 96), (150, 300), 1],
-    [(189, 96), (150, 300), 1],
-    [(198, 96), (150, 300), 1],
-    [(204, 96), (150, 300), 1],
-    [(216, 96), (150, 300), 1],
-    [(225, 102), (150, 300), 1],
-    [(234, 108), (150, 300), 1],
-    [(243, 108), (150, 300), 1],
-    [(255, 105), (150, 300), 1],
-    [(264, 102), (150, 300), 1],
-    [(268, 96), (150, 300), 1],
-    [(271, 87), (150, 300), 1],
-    [(273, 78), (150, 300), 1],
-    [(273, 69), (150, 300), 1],
-    [(273, 60), (150, 300), 1],
-    [(273, 54), (150, 300), 1],
-    [(270, 48), (150, 300), 1],
-    [(261, 36), (150, 300), 1],
-    [(264, 30), (150, 300), 1],
-    [(276, 21), (150, 300), 1],
-    [(288, 21), (150, 300), 1],
-    ]
-
-    dwell_time = 0.25
-    feed_rate = 9000
-
-
-    commands = [
-    (f"G1 X{p1[0]} Y{p1[0]} F{feed_rate}", p1[0], p1[1])
-    for p1, p2, p in path_points
-    ]
-
-
-    pause_send_latencies = []
-    execution_latencies = []
-    all_command_delays = []
-
-
-
-    #execution --> gets and sends gcode/takes stuff from the path_points, puts telemetry co-ordinates into the queue
-
-    # track --> runs in parallel, takes co-orindates from the queue checks the condition, if it activated, an event is triggered
-    #if teh event is trigered, the execution/command_script keeps executing until either copletion of event is triggered
-
-
-    #needs to track 
-    prox_join1 = np.array([150.236, -50.09536])
-    length_a1 = 221.0968 #promximal arm
-    length_b1 = 220.61278 #distal arm
-
-
-    prox_join2 = np.array([151.16978, -53.04552])
-    length_a2 = 225.39945
-    length_b2 = 227.54048
-
-    n = 0
-
-    while not collision_post_pause.is_set() and n != len(path_points):
         
-            pos1, pos2, p = path_points[n] 
-            coords_list.append(path_points[n])
+        with open(path / "order.txt", "w") as out:
+            out.write("Begin experiment\n")
+
+        loop_check = set()
+        in_flight = set()
+        blocked = set()
+        recovery_since_progress = False
+
+
+
+        while not stop_requested.is_set():
+
+            #any time 'continue' is used it means restart the loop
+
+            printers_with_work = {
+                q for q in ip
+                if any(value[0] == "A" for value in printer[q].codes.values())
+            }
+            print(f'printers with work {printers_with_work}')
+
+            if not printers_with_work and not in_flight:
+                stop_requested.set()
+                break
+            ####this if branch is supposed to deal with loop check
+            if (
+                printers_with_work
+                and printers_with_work <= loop_check
+                and not in_flight
+                and set(ip) <= blocked
+                ):
+                if recovery_since_progress:
+                    raise RuntimeError(
+                        "All remaining candidates still fail after recovery; "
+                        "check geometry and the configured recovery route"
+                    )
+                recovery_since_progress = True
+
+                with open(path / "order.txt", "a") as out:
+                    out.write("deadlock: requesting recovery for both printers\n")
+
+                #tell the execution script to start recovery
+                execution_request_queue.put(("__recover__", None))
+
+
+                deadline = time.monotonic() + RECOVERY_TIMEOUT + 10.0
+                while not stop_requested.is_set():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Execution worker did not complete recovery") 
+                    try:
+                        result, observed = execution_result_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if result != "recovered":
+                        raise RuntimeError(f"Recovery failed: {(result, observed)}")
+                    if not isinstance(observed, dict) or set(observed) != set(printer):
+                        raise RuntimeError("Recovery did not return both printer positions")
+
+                    positions = {
+                        q: tuple(map(float, observed[q])) for q in printer
+                    }
+                    # Build every polygon before publishing any replacement.
+                    footprints = {
+                        q: polygon_at_position(q, printer, positions[q])
+                        for q in printer
+                    }
+
+                    print(
+                        f"POSE_WRITE t={time.monotonic():.6f} reason=recovery "
+                        f"old={store_coords.copy()} new={positions}", flush=True,
+                    )
+
+
+                    store_coords.update(positions)
+                    store_polygons.update(footprints)
+                    # No normal event is released until BOTH dictionaries are updated.
+                    loop_check.clear()
+                    for q in sorted(blocked):
+                        if any(v[0] == "A" for v in printer[q].codes.values()):
+                            tracker_control_queue.put(("retry", q))
+                            blocked.remove(q)
+                    with open(path / "order.txt", "a") as out:
+                        out.write(f"recovered: observed positions={positions}\n")
+                    break
+                if stop_requested.is_set():
+                    return
+                continue
+
+                
+
+            # get() removes ONLY the oldest message. Everything else waits.
+            try:
+                p, status = tracker_event_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            if status != "free":
+                raise RuntimeError(f"Unexpected tracker event: {(p, status)}")
+
+            if p not in printer:
+                raise RuntimeError(f"Unknown printer in tracker event: {p}")
+
+            if p in in_flight:
+                in_flight.remove(p)
+                loop_check.clear()
+                recovery_since_progress = False
+                for q in sorted(blocked):
+                    if any(v[0] == "A" for v in printer[q].codes.values()):
+                        tracker_control_queue.put(("retry", q))
+                        blocked.remove(q)
+
+            # Required before no-print or print controls can be applied.
+
+
+            print(
+                f"FREE_CONSUMED t={time.monotonic():.6f} p={p} "
+                f"stored_now={store_coords.copy()}", flush=True,
+            )
+
+
+
+            tracker_control_queue.put(("hold", p))
+
+            #past this is wehre simulation starts
+
+
+
+
+            # if status is not free, just continue to probe the queue
+            #if status says Finsihed, that means all gcode commands have been executed
+            #in that case, send a command ot all printers to raise by Z = +10 and break from the loop
+
+            # if status != "free":
+            #     raise ValueError(f"Unexpected idle message: {(p, status)}")
+
+
+
+
+
+
+
+
+
+
+
+
+            #how is this different from coordinates = store_coordinates.copy()
+            coordinates = {
+                q: tuple(position) 
+                for q, position in store_coords.copy().items()
+            }
+
+
+            #hwo is this different from comparison_polygons = store_polygons.copy()
+            comparison_polygons = {
+                q: polygon_at_position(q, printer, coordinates[q])
+                for q in printer
+            }
+
+            # Existing simulation files embed coordinates. Regenerate using
+            # telemetry, without changing sim_px or simulate_candidate.
+
+            print(
+                f"POSE_SNAPSHOT t={time.monotonic():.6f} "
+                f"candidate_printer={p} coordinates={coordinates}", flush=True,
+            )
+
+            sim_px(p, printer[p].codes, coordinates, config)
+
+
+
+
+
+
+
+            rejected = set()
+            eligible_count = sum(
+            value[0] == "A" for value in printer[p].codes.values()
+                )
+
+
+
 
 
             
-            try:
+            if eligible_count == 0:
+                tracker_control_queue.put(("no print", p))
+                blocked.add(p)
+                continue
 
-                
-                position_queue1.put_nowait(path_points[n])
-                position_queue2.put_nowait(path_points[n])
-                
 
-            except queue.Full:
-                print('full queue, delay occured \n\n\n\n\n\n\n\n\n')
-                pass
-            n += 1
-            time.sleep(dwell_time)
-    if collision_post_pause.is_set():
-        return ['Coll', p]
-    else:
-        return [None, None]
-    
+
+            while not stop_requested.is_set():
+                if count[p] == 1:
+                    candidate = pick_command_px(p, printer, coordinates, b = True, excluded=rejected)
+                else:
+                    candidate = pick_command_px(p, printer, coordinates, b = False, excluded=rejected)
 
 
 
 
 
 
+                if candidate is None:
+                    break
+                candidate_polygon, candidate_final_coords = simulate_candidate(
+                    p=p, candidate=candidate, printer=printer,
+                    store_coords=coordinates, config=config,
+                    simulation_queue=simulation_queue,
+                    visualization_delay=0.03 if simulation_queue is not None else 0,
+                )
 
 
 
-#these additional currents and codes in the input are only for simulation purposes
-def execute(codes, current_x1_raw, current_y1_raw, current_x2_raw, current_y2_raw, command, ip, position_queue1: mp.Queue, position_queue2, error_queue, safety, coords_list, collision_pre_pause, collision_post_pause, track_switch, pre_switch, post_switch, config):
-    try:
-        pre_switch.set()
-        post_switch.clear()            
 
-        with open(command, 'r') as r:
-            #this constant simulation thing is only for simulation purposes, remove them when implementing
-            if ip == 1:
-                sim_p1(codes, current_x2_raw, current_y2_raw, config)
-            else:
-                sim_p2(codes, current_x1_raw, current_y1_raw, config)
-            line = r.readline()
-            while line is None:
-                #print(line)
-                line = r.readline()
-            while not collision_pre_pause.is_set() and line:
-                try:
-                    l = list()
-                    for i in line.split('),'):
-                        for j in i.split('[('):
-                            for k in i.split('('):
-                                for z in k.split(','):
-                                    l.append(z)
+                collisions = collides_with_stored(
+                    candidate_polygon, p, comparison_polygons,
+                )
 
-                    x1 = float(l[1])
-                    y1 = float(l[2])
-                    x2 = float(l[7])
-                    y2 = float(l[8])
-                    p = int(l[9].strip()[0])
+                simulation_result = {
+                    "type": "result", "printer": p, "gcode": candidate,
+                    "accepted": not bool(collisions),
+                    "overlap": sum(collisions.values()),
+                }
+                if simulation_queue is not None:
+                    simulation_result.update({
+                        "collisions": dict(collisions),
+                        "positions": candidate_final_coords,
+                        "physical_bounds": PHYSICAL_BOUNDS,
+                        "candidate_polygon": mapping(candidate_polygon),
+                        "stored_polygons": {
+                            other_p: mapping(polygon)
+                            for other_p, polygon in comparison_polygons.items()
+                            if other_p != p and polygon is not None
+                        },
 
-                    pos1, pos2, p = (x1, y1), (x2, y2), p
-                    coords_list.append([(x1, y1), (x2, y2), p])
-                    
-                except (ValueError, IndexError) as exc:
-                    
-                    print(f'line: {line} was invalid')
-                    print(exc)
-                    line = r.readline()
+                        "overlap_polygons": {
+                            other_p: mapping(candidate_polygon.intersection(comparison_polygons[other_p]))
+                            for other_p in collisions
+                        },
+                    })
+                _try_send_sim_frame(simulation_queue, simulation_result)
+                if collisions:
+                    rejected.add(candidate)
+                    with open(path / "order.txt", "a") as out:
+                        out.write(f"reject p{p}:{candidate}; collision={collisions}\n")
                     continue
 
 
 
-                try:
 
-                    time.sleep(0.5)
-                    position_queue1.put_nowait([pos1, pos2, p])
 
-                    position_queue2.put_nowait([pos1, pos2, p])
-                except queue.Full:
-                    print('full queue, delay occured \n\n\n\n\n\n\n\n\n')
-                    pass
-                line = r.readline()
-
-        
-
-    except Exception as exc:
-        error_queue.put({
-            "command": command,
-            "error": repr(exc),
-        })
-        raise
-
-    if collision_pre_pause.is_set():
-        return ['Coll', p]
-    else:
-        return x1, y1, x2, y2
+                mark_gcode_unavailable(candidate, printer)
 
 
 
 
-def pick_command_p1(codes1, codes2, path):
-    statuses = [False if i[0] == 'A' else True for i in codes1.values()]
-    statuses_ind = np.flatnonzero(np.array([i[0] for i in codes1.values()]) == 'A')
 
-        
-    '''the stuff below is for random choice'''
-    # while not all(statuses): #continouosly check until there is one that meets extra conditions
-    #     #input: codes[x] = [a, [x,y]]
-
-    #     #pick the key
-    #     if statuses_ind is None:
-    #         break
-    #     key = list(codes1)[random.choice(statuses_ind)]
-    #     codes1[key][0] = 'N'
-    #     with open(path / 'order.txt', 'a') as r:
-    #         r.write(f'printer 1 --> {key} \n')
-    #     try:
-    #         codes2[key][0] = 'N'
-    #     except:
-    #         pass
-    #     statuses = [False if i[0] == 'A' else True for i in codes1.values()]
-    #     statuses_ind = np.flatnonzero(np.array([i[0] for i in codes1.values()]) == 'A')
+                #there is a stage there shoudl says only middle is used
+                if count[p] == 1:
+                    filename = f"{Path(candidate).stem}_b.gcode"
+                else:
+                    filename = f"{Path(candidate).stem}_{stage}.gcode"
 
 
-    order = [15, 14, 13, 12, 10, 11, 8, 9, 7][::-1]
-    for o in order:
-        if codes1[f'{o}.gcode'][0] == 'A':
-            with open(path / 'order.txt', 'a') as r:
-                r.write(f'printer 1 --> {o}.gcode \n')
-            codes1[f'{o}.gcode'][0] = 'N'
-
-            return f'{o}.gcode'
-
-def pick_command_p2(codes1, codes2, path):
-    statuses = [False if i[0] == 'A' else True for i in codes2.values()]
-    statuses_ind = np.flatnonzero(np.array([i[0] for i in codes2.values()]) == 'A')
-
-
-    while not all(statuses):
-        # if codes2['1.gcode'][0] == 'A':
-        #     with open(path / 'order.txt', 'a') as r:
-        #         r.write(f'printer 2 --> 1.gcode \n')
-        #     codes2['1.gcode'][0] = 'N'
-        #     return '1.gcode'
-
-
-        #input: codes[x] = [a, [x,y]]
-
-        #pick the key
-        if statuses_ind is None:
-            break
-        key = list(codes2)[random.choice(statuses_ind)]
-        codes2[key][0] = 'N'
-        with open(path / 'order.txt', 'a') as r:
-            r.write(f'printer 2 --> {key} \n')
-        
-        try:
-            codes2[key][0] = 'N'
-        except:
-            pass
-        statuses = [False if i[0] == 'A' else True for i in codes2.values()]
-        statuses_ind = np.flatnonzero(np.array([i[0] for i in codes2.values()]) == 'A')
-
-        # check = True
-        # for i in codes[key][0]:
-        #     #conditinos for rejectoin
-        #     #x cannot be negative and be greater than 300
-        #     #y cannot be negative and be greater than 300
-        #     #printer 2 is strictly forbidden from reaching points with maxX or maxY reach 0
-        #     #maxY really should be able ot rach 0, but i am not differentiation x and y just yet
-
-        #     #for now does not differentiate between x and y co-ordinates
-        #     if (i<=0) or (i > 300):
-        #         check = False
-
-        
-        #statuses = [False if i[0] == 'A' else True for i in codes.values()]
-        return key
-    
-    return None
+                with open(path / "order.txt", "a") as out:
+                    out.write(f"execute p{p}:{filename}\n")
 
 
 
-  
 
 
 
-def command_script(codes1, codes2, position_queue1: mp.Queue, position_queue2, execution_finished, stop_requested, error_queue: mp.Queue, coords_list, collision_pre_pause, collision_post_pause, track_switch, pre_switch, post_switch, clear_perim, perim_area, config):
 
-    
-    ip1 = '192.168.0.15'
-    ip2 = '192.168.0.16'
-    folder1 = Path(r'c:\Users\nural\python2\group-of-code2\p1')
-    folder2 = Path(r'c:\Users\nural\python2\group-of-code2\p2')
-    sequence = list()
+                in_flight.add(p)
+                execution_request_queue.put((filename, p))
+
+                # First wait: execution confirms submission.
+                while not stop_requested.is_set():
+                    try:
+                        result, response_p = execution_result_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if (result, response_p) != ("sent", p):
+                        raise RuntimeError(f"Execution failed: {(result, response_p)}")
+                    break
 
 
+
+
+
+
+
+
+                # Second wait: tracking confirms extrusion for this printer.
+                # Do NOT read tracker_event_queue in either waiting loop.
+
+
+
+                if stop_requested.is_set():
+                    return
+
+
+                #now the command script is responibel for telling the tracker to watch after having
+                # sent the execution command to the printer, not sure how correct this is
+                #but we will see, shouldn't be much of a difference because either way
+                #the tracker watches only after the execution command is sent
+
+                tracker_control_queue.put(("print", p))
+
+                while not stop_requested.is_set():
+                    try:
+                        result, response_p = printing_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if (result, response_p) != ("Is printing", p):
+                        raise RuntimeError(f"Unexpected printing message: {(result, response_p)} instead of {("Is printing", p)}")
+
+
+                    print(
+                        f"PRINT_ACK t={time.monotonic():.6f} p={p} file={filename} "
+                        f"stored_now={store_coords.copy()}", flush=True,
+                    )
+                    
+                    
+                    count[p] += 1
+                    print(count)
+                    break
+                break  # Return to the outer FIFO get() only now.
+
+            #write a script that checks the length of the rejected and the amount of codes that p1 was eligible to take 'A' status
+            #if they are equal, then px in this turn was not eligible to take anything and has to pass his turn
+            # then you run tracker_control_queue.put(('no print', p))
+            if not stop_requested.is_set() and len(rejected) == eligible_count and eligible_count > 0:
+                tracker_control_queue.put(("no print", p))
+                blocked.add(p)
+                loop_check.add(p) 
 
 
             
 
-
-
-
-    try:
-
-
-        #basically, for each select 1 executed, we need to check through all other gcodes and their points whether they are inside any of the segments covered by select 1 execution
-            #but where is the time saving? so for every frame of select 1, we are sifting through all positions at other gcodes?
-            #so just to save time from executing x gcode cells that are definitely colliding, we are asking to check all X reachable gcodes n amount of times (where n is the frame)
-            #whilst previously we would first form all 'a' rectangles by printer 1, then per each 'x' gcode, printer 2 would form 'b' rectangles, and then we would check a*b rectangles for that 'x' gcode, and if there are 'z' gcodes for ptiner two, we would check z*a*b rectangeles  per each gcode at whic printer 1 was located
-            #now, the new suggestion asks that for each rectangle formed by printer 2, we check through b*x points to check whether any of those points are in the rectangle. and so since printer 1 has a rectangles to check all the points against, we would need to check a*x*b points to check whether nay of the gcodes are boundaring the current printer 1 and can use that to reduce which printer 2 gcodes can visit, such that x_new < x. 
-            # but by that time, you have already done a*x*b executions (not checking rectangle rectangle intersection, but whether the point is inside the rectangle)
-            # will ther really be any savings, given the current algorithm? 
-
-                ################IMPORTANT ######################
-            #with regards to discretizatoin, lets say you have a gcode generated from slicer of a square
-            #and you use the plotting stuff to draw it
-            #then you need to generate the polygon from that
-                #################IMPORTANT ###################
-
-            #gpt has suggested other methods to determine whether two gcode files share a boundary, for now, we will use the ronnie way (second) without considering whether it really does provide speed up
-            #wait what if i use polygon in polygon algorithm
-            # from shapely.geometry import Polygon
-
-            # # Define the first polygon (a square)
-            # polygon1 = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
-
-            # # Define the second polygon (an overlapping square)
-            # polygon2 = Polygon([(1, 1), (3, 1), (3, 3), (1, 3)])
-
-            # # Check if they intersect (returns True if they overlap or touch)
-            # do_intersect = polygon1.intersects(polygon2)
-
-            # print("Do polygons intersect?", do_intersect)
-
-            #so for each select, we can iterate through all polygons (gcodes) and check with n operations if it intersects polygons
-            #so the total number of operations for check boundaries would be n * k (where k si teh number of eligible gcodes for pitner 1)
-
-
-
-
-
-# Output: Do polygons intersect? True
-
-            #use this to check if every point in all gcode boundary points are inside the rectangle
-            # from matplotlib.path import Path
-
-            # # Define polygon and the path object
-            # vertices = [point1, point2, point4, point3, point1] # Close the loop
-            # polygon_path = Path(vertices)
-
-            # # Single point check (Returns True/False)
-            # is_inside = polygon_path.contains_point((x, y))
-
-            # # Vectorized batch check (Returns array of True/False)
-            # grid_mask = polygon_path.contains_points([(x1, y1), (x2, y2), (x3, y3)])
-
-
-        cur_x1_raw = 300
-        cur_y1_raw = 0
-        cur_x2_raw = 300
-        cur_y2_raw = 0
-
-        path = Path(r'C:\Users\nural\python2')
-        open(path / 'order.txt', 'w')
-
-        sim_p1(codes1, cur_x2_raw, cur_y2_raw, config)
-        sim_p2(codes2, cur_x1_raw, cur_y1_raw, config)
-
-
-        select1 = pick_command_p1(codes1, codes2, path) #the function comes from 
-
-        #while not all([codes1[i][0] == 'N' for i in codes1]):
-        while select1 is not None:  
-
-
-            for i in codes2.values():
-                i[0] = 'A'
-
-            if select1 in codes2:
-                codes2[select1][0] = 'N'
-
-            command = Path(fr'C:\Users\nural\python2\sim_fold\p1\{select1}')
-            cur_x1_raw, cur_y1_raw, cur_x2_raw, cur_y2_raw = execute(codes1, cur_x1_raw, cur_y1_raw, cur_x2_raw, cur_y2_raw, command, 1, position_queue1, position_queue2, error_queue, True, coords_list, collision_pre_pause, collision_post_pause, track_switch, pre_switch, post_switch, config)
-            #be careful with execute, it may send the positions faster than the animation is able to render and record all perim_areas, 
-            #in real execution, that would not be a problem as execute would keep running until printer stopped 'print' status
-            #in here tho, we shall just use time.sleep
-            #maybe, teh tracker tracks the perim_area or the animation idk, we'll see
-            time.sleep(5)
-            p1_coords = [] 
-            for i in perim_area:
-                if i[0] == 'p1':
-                    p1_coords.append(i[1:])
-            
-            poly1_list = []
-            for aa in p1_coords:
-                point1, point2, point3, point4 = aa[1], aa[2], aa[3], aa[4]
-                rect1_poly1 = Polygon([
-                (point1[0], point1[1]),
-                (point2[0], point2[1]),
-                (point4[0], point4[1]),
-                (point3[0], point3[1])
-                ])
-                poly1_list.append(rect1_poly1)
-
-            occupied_area_1 = unary_union(poly1_list)
-
-
-
-                
-
-
-            while not all([codes2[i][0] == 'N' for i in codes2]):
-                select2 = pick_command_p2(codes1, codes2, path)
-                if select2 is not None:
-                    command = Path(fr'C:\Users\nural\python2\sim_fold\p2\{select2}')
-                    cur_x1_raw, cur_y1_raw, cur_x2_raw, cur_y2_raw = execute(codes2, cur_x1_raw, cur_y1_raw, cur_x2_raw, cur_y2_raw, command, 2, position_queue1, position_queue2, error_queue, True, coords_list, collision_pre_pause, collision_post_pause, track_switch, pre_switch, post_switch, config)
-                    #be careful with execute, it may send the positions faster than the animation is able to render and record all perim_areas, 
-                    #in real execution, that would not be a problem as execute would keep running until printer stopped 'print' status
-                    #the collision checking would probbaly be put into 'track' submodule or left in 'animation'
-                    #in here tho, we shall just use time.sleep
-                    time.sleep(5)
-                    p2_coords = []
-                    for i in perim_area:
-                        if i[0] == 'p2':
-                            p2_coords.append(i[1:])
-                    
-            ##############here, you check for collisions###########
-
-
-                    
-                    poly2_list = []
-                    for bb in p2_coords:
-                        point1_2, point2_2, point3_2, point4_2 = bb[1], bb[2], bb[3], bb[4]
-                        rect2_poly1 = Polygon([
-                        (point1_2[0], point1_2[1]),
-                        (point2_2[0], point2_2[1]),
-                        (point4_2[0], point4_2[1]),
-                        (point3_2[0], point3_2[1])
-                        ])
-                        poly2_list.append(rect2_poly1)
-
-                    occupied_area_2 = unary_union(poly2_list)
-
-
-                    collision = occupied_area_1.intersection(occupied_area_2)
-                    overlap = collision.area
-
-
-
-                    with open(path / 'order.txt', 'a') as w:
-
-                        w.write(f'p1:{select1} + p2:{select2} --> {collision}, with {overlap} area \n')
-
-
-
-
-                    # for aa in p1_coords:
-                    #     for bb in p2_coords:
-
-                    #         point1_1, point2_1, point3_1, point4_1 = aa[1], aa[2], aa[3], aa[4]
-                    #         point1, point2, point3, point4 = bb[1], bb[2], bb[3], bb[4]
-
-                    #         cur_x1_sample, cur_y1_sample = aa[0]
-                    #         cur_x2_sample, cur_y2_sample = bb[0]
-
-                    #         prox_join2 = np.array([151.16978, -53.04552])
-                    #         length_a2 = 225.39945
-                    #         length_b2 = 227.54048
-                    #         _, elbow_x2, elbow_y2 = inverse_kinematic(cur_x2_sample, cur_y2_sample, prox_join2, length_a2, length_b2)
-                    #         elbow_plot_x, elbow_plot_y = machine2_to_plot(elbow_x2, elbow_y2)
-
-
-                            
-                    #         prox_join11 = np.array([150.236, -50.09536])
-                    #         length_a1 = 221.0968 #promximal arm
-                    #         length_b1 = 220.61278 #distal arm
-                    #         _, elbow_x1, elbow_y1 = inverse_kinematic(cur_x1_sample, cur_y1_sample, prox_join11, length_a1, length_b1)
-                    #         elbow_x, elbow_y = machine1_to_plot(elbow_x1, elbow_y1)
-
-                    #         rect2 = [
-                    #             point1,
-                    #             point2,
-                    #             point4,
-                    #             point3
-                    #         ]
-                    #         rect1 = [
-                    #             point1_1,
-                    #             point2_1,
-                    #             point4_1,
-                    #             point3_1
-                    #         ]
-                            
-                    #         collision1 = rectangles_intersect(rect1, rect2)
-                    #         collision2 = collision1
-                    #         collision3 = collision1
-
-
-                    #         # 4. does circle and line edges corss
-                    #         for i in range(4):
-                    #             a = rect1[i]
-                    #             b = rect1[(i + 1) % 4]
-                    #             if segment_intersects_circle(a, b, elbow_plot_x, elbow_plot_y, float(75/2)):
-                    #                 collision2 = True
-
-                    #         # 4. does circle and line edges corss
-                    #         for i in range(4):
-                    #             a = rect2[i]
-                    #             b = rect2[(i + 1) % 4]
-                    #             if segment_intersects_circle(a, b, elbow_x, elbow_y, float(75/2)):
-                    #                 collision3 = True
-
-
-
-                    #         with open(path / 'order.txt', 'a') as w:
-                    #             if collision1 == True or collision2 == True or collision3 == True:
-                    #                 w.write(f'p1:{select1} + p2:{select2} --> {collision1}, {collision2}, {collision3} \n')
-                    
-
-                    perim_area_copy = [i for i in perim_area if i[0] == 'p1']
-                    perim_area.clear()
-                    for i in perim_area_copy:
-                        perim_area.append(i)
-
-            perim_area.clear()
-            clear_perim.set()
-            select1 = pick_command_p1(codes1, codes2, path)
-        
-
-        
-
-
-
-    except ValueError as e:
-        print(p1_coords)
-        execution_finished.set()
-        raise e
-   
     except Exception:
- 
-        error_queue.put(("command_worker", traceback.format_exc()))
+        error_queue.put(("command_script", traceback.format_exc()))
+        stop_requested.set()
         raise
-    except KeyboardInterrupt as e:
-
- 
-        print(error_queue.get_nowait())
-        execution_finished.set()
-        raise e
-
     finally:
-        # print(sequence)
-        
-        
-
+        _try_send_sim_frame(simulation_queue, {"type": "stop"})
         execution_finished.set()
+
+
+
+
+

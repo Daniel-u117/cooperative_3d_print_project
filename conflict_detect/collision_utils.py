@@ -41,7 +41,7 @@ def xy_points_after_m107(config, file_path: Path, start_x=None, start_y=None):
             if not line or line.startswith(";"):
                 continue
 
-            #command = line.split(maxsplit=1)[0]
+            command = line.split(maxsplit=1)[0]
 
             # if command not in {"G0", "G00", "G1", "G01"}:
             #     continue
@@ -73,36 +73,14 @@ def write_sim_file(out_path: Path, frames):
             w.write(repr(frame) + "\n")
 
 
-def sim_one_p1(file_name, cur_x1_raw, cur_y1_raw, cur_x2_raw, cur_y2_raw, config):
-    """
-    Simulate one printer-1 G-code file.
-
-    Printer 1 moves.
-    Printer 2 stays frozen at its last known position.
-    """
-    targ = config.p1_fold / file_name
-    frames = []
-
-    last_x1 = cur_x1_raw
-    last_y1 = cur_y1_raw
-
-    for x1, y1 in xy_points_after_m107(config, targ, start_x=cur_x1_raw, start_y=cur_y1_raw):
-        last_x1 = x1
-        last_y1 = y1
-
-        frames.append([
-            (x1, y1),
-            (cur_x2_raw, cur_y2_raw),
-            1
-        ])
-
-    write_sim_file(config.out_p1 / file_name, frames)
 
 
 
-def sim_p1(codes, cur_x2_raw, cur_y2_raw, config):
+def sim_px(p, codes, store_coords, config):
+
+        
     for i in codes:
-        targ = Path(rf'C:\Users\nural\python2\group-of-code2\p1\{i}')
+        targ = Path(rf'C:\Users\nural\python2\group-of-code2\boundaries_store\p{p}\{i}')
         with open(targ, 'r') as r:
             line = r.readline().strip()
 
@@ -113,60 +91,118 @@ def sim_p1(codes, cur_x2_raw, cur_y2_raw, config):
 
             #line = r.readline().strip()
             print(line)
-            cur_x1_sim, cur_y1_sim = extract_xy(config, line)
-            print(cur_x1_sim, cur_y1_sim)
+            cur_x_sim, cur_y_sim = extract_xy(config, line)
+            print(cur_x_sim, cur_y_sim)
 
         
        
-        sim_one_p1(i, cur_x1_sim, cur_y1_sim,  cur_x2_raw, cur_y2_raw, config)
+        sim_one_px(p, i, cur_x_sim, cur_y_sim, store_coords, config)
 
 
-def sim_one_p2(file_name, cur_x1_raw, cur_y1_raw, cur_x2_raw, cur_y2_raw, config):
-    """
-    Simulate one printer-1 G-code file.
 
-    Printer 1 moves.
-    Printer 2 stays frozen at its last known position.
-    """
-    targ = config.p2_fold / file_name
+###might be problematic, fix later####
+def sim_one_px(p, file_name, cur_x_sim, cur_y_sim, store_coords, config):
+
+    targ = config.px_fold[p] / file_name
+    #remember that config is
+            #     px_fold = {
+            #     1: Path(r"C:\Users\nural\python2\group-of-code2\sim\p1"),
+            #     2: Path(r"C:\Users\nural\python2\group-of-code2\sim\p2"),
+            # }
+
+            # out_px = {
+            #     1: sim_fold / "p1",
+            #     2: sim_fold / "p2",
+            # }
+
+            # for path in out_px.values():
+            #     path.mkdir(parents=True, exist_ok=True)
+
+            # config = SimConfig(
+            #     sim_fold=sim_fold,
+            #     px_fold=px_fold,
+            #     out_px=out_px,
+            #     coord_pattern=coord_pattern,
+            # )
+
     frames = []
 
-    last_x2 = cur_x2_raw
-    last_y2 = cur_y2_raw
-
-    for x2, y2 in xy_points_after_m107(config, targ, start_x=cur_x2_raw, start_y=cur_y2_raw):
-        last_x2 = x2
-        last_y2 = y2
-
-        frames.append([
-            (cur_x1_raw, cur_y1_raw),
-            (x2, y2),
-            2
-        ])
-
-    write_sim_file(config.out_p2 / file_name, frames)
 
 
+    for x, y in xy_points_after_m107(
+        config,
+        targ,
+        start_x=cur_x_sim,
+        start_y=cur_y_sim
+    ):
 
-def sim_p2(codes, cur_x1_raw, cur_y1_raw, config):
-    for i in codes:
-        print(i)
-        targ = Path(rf'C:\Users\nural\python2\group-of-code2\p2\{i}')
-        with open(targ, 'r') as r:
-            line = r.readline().strip()
+        frame_coords = []
 
-            # while line != 'M107':
-            #     line = r.readline().strip()
+        for printer_id in sorted(store_coords):
+
+            if printer_id == p:
+                frame_coords.append((x, y))
+            else:
+                frame_coords.append(store_coords[printer_id])
+
+        frame = frame_coords + [p]
+
+        frames.append(frame)
 
 
-            # line = r.readline().strip()
-            print(line)
-            cur_x2_sim, cur_y2_sim = extract_xy(config, line)
-            print(cur_x2_sim, cur_y2_sim)
+    write_sim_file(
+        config.out_px[p] / file_name,
+        frames
+    )
+
+
+
+# def sim_one_p2(file_name, cur_x1_raw, cur_y1_raw, cur_x2_raw, cur_y2_raw, config):
+#     """
+#     Simulate one printer-1 G-code file.
+
+#     Printer 1 moves.
+#     Printer 2 stays frozen at its last known position.
+#     """
+#     targ = config.p2_fold / file_name
+#     frames = []
+
+#     last_x2 = cur_x2_raw
+#     last_y2 = cur_y2_raw
+
+#     for x2, y2 in xy_points_after_m107(config, targ, start_x=cur_x2_raw, start_y=cur_y2_raw):
+#         last_x2 = x2
+#         last_y2 = y2
+
+#         frames.append([
+#             (cur_x1_raw, cur_y1_raw),
+#             (x2, y2),
+#             2
+#         ])
+
+#     write_sim_file(config.out_p2 / file_name, frames)
+
+
+
+# def sim_p2(codes, cur_x1_raw, cur_y1_raw, config):
+#     for i in codes:
+#         print(i)
+#         targ = Path(rf'C:\Users\nural\python2\group-of-code2\p2\{i}')
+#         with open(targ, 'r') as r:
+#             line = r.readline().strip()
+
+#             # while line != 'M107':
+#             #     line = r.readline().strip()
+
+
+#             # line = r.readline().strip()
+#             print(line)
+#             cur_x2_sim, cur_y2_sim = extract_xy(config, line)
+#             print(cur_x2_sim, cur_y2_sim)
 
         
        
-        sim_one_p2(i, cur_x1_raw, cur_y1_raw,  cur_x2_sim, cur_y2_sim, config)
+#         sim_one_p2(i, cur_x1_raw, cur_y1_raw,  cur_x2_sim, cur_y2_sim, config)
 
 
 
@@ -180,9 +216,12 @@ def sim_p2(codes, cur_x1_raw, cur_y1_raw, config):
         
 
 
-    return None
+#     return None
 
 
+
+
+#do i even use these?
 def segment_intersects_circle(a, b, elbow_plot_x, elbow_plot_y, r):
     """
     Returns True if line segment AB intersects or touches

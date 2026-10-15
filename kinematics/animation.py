@@ -8,6 +8,10 @@ import queue
 from matplotlib.animation import FuncAnimation
 from matplotlib.ticker import FuncFormatter
 from matplotlib.patches import Circle
+import time
+from shapely.geometry import MultiPoint, Polygon
+from shapely import concave_hull
+from shapely.ops import unary_union
 
 
 def closest_point_on_segment(p, q, r):
@@ -84,7 +88,7 @@ def inverse_kinematic(cur_x, cur_y, prox_join, length_a, length_b):
 
 
 
-def animation_script(codes1, codes2, position_queue1, execution_finished, stop_requested, clear_perim, perim_area):
+def animation_script(position_queue1, execution_finished, stop_requested, printer):
 
     #width of the nozzle is about 1/3 of 50, so about 17
     #width of the elbow is about 1.5 times 50 = 75
@@ -138,36 +142,32 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
         # Matplotlib linewidth is measured in points.
         return width_pixels * 72.0 / ax.figure.dpi
 
-    def update_physical_linewidths():
+    def update_physical_linewidths(_=None):
+
         proximal_width_points = data_width_to_points(
             ax,
-            10 
+            10
         )
 
         distal_width_points = data_width_to_points(
             ax,
-            31.25 #62.5 will act like a line with width of 100, 31.25 = 50
+            31.25
         )
-        #the most middle  part of the arm has thickness of about 50 mm
-        
 
-        line1.set_linewidth(proximal_width_points)
-        line3.set_linewidth(proximal_width_points)
-
-        line2.set_linewidth(distal_width_points)
-        line4.set_linewidth(distal_width_points)
+        for px in printer.values():
+            px.line1.set_linewidth(proximal_width_points)
+            px.line2.set_linewidth(distal_width_points)
 
 
 
+    # prox_join11 = np.array([150.236, -50.09536])
+    # length_a1 = 221.0968 
+    # length_b1 = 220.61278 
 
-    prox_join11 = np.array([150.236, -50.09536])
-    length_a1 = 221.0968 
-    length_b1 = 220.61278 
 
-
-    prox_join2 = np.array([151.16978, -53.04552])
-    length_a2 = 225.39945
-    length_b2 = 227.54048
+    # prox_join2 = np.array([151.16978, -53.04552])
+    # length_a2 = 225.39945
+    # length_b2 = 227.54048
 
     fig, ax = plt.subplots(figsize=(7, 7))
 
@@ -180,36 +180,40 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
     ax.plot([0,0], [-300, 0], color = 'black')
     ax.plot([0, 300], [-300, -300], color = 'black')
 
-    for i in codes1:
-        for j in codes1[i][1]:
-            x,y = j
-            x,y = machine1_to_plot(x,y)
-            ax.annotate(
-                f'{i}',
-                xy = (y,x),
-                color = 'blue',
-                fontsize = 5
-            )
 
-    for i in codes2:
-        for j in codes2[i][1]:
-            x,y = j
-            x,y = machine2_to_plot(x,y)
-            ax.annotate(
-                f'{i}',
-                xy = (y,x),
-                color = 'red',
-                fontsize = 5,
-            )
+
+
+
+    # for i in codes1:
+    #     for j in codes1[i][1]:
+    #         x,y = j
+    #         x,y = machine1_to_plot(x,y)
+    #         ax.annotate(
+    #             f'{i}',
+    #             xy = (y,x),
+    #             color = 'blue',
+    #             fontsize = 5
+    #         )
+
+    # for i in codes2:
+    #     for j in codes2[i][1]:
+    #         x,y = j
+    #         x,y = machine2_to_plot(x,y)
+    #         ax.annotate(
+    #             f'{i}',
+    #             xy = (y,x),
+    #             color = 'red',
+    #             fontsize = 5,
+    #         )
 
 
     ax.set_xlim(-100, 400)
     ax.set_ylim(-400, 400)
 
 
-    ax.yaxis.set_major_formatter(
-        FuncFormatter(lambda x_plot, pos: f"{300 - x_plot:g}")
-    )
+    # ax.yaxis.set_major_formatter(
+    #     FuncFormatter(lambda x_plot, pos: f"{300 - x_plot:g}")
+    # )
 
     ax.set_xlabel("machine x1")
     ax.set_ylabel("machine y1")
@@ -247,58 +251,95 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True)
 
+
+
+
+
+
+    # #all these are now in the plotting co-ordinates, not co-ordinates of p1
+
+    # _, elbow_x1, elbow_y1 = inverse_kinematic(cur_x1_raw, cur_y1_raw, prox_join11, length_a1, length_b1)
+
+
+
+    # prox_join_x, prox_join_y = machine1_to_plot(
+    #     prox_join11[0],
+    #     prox_join11[1]
+    # )
+
+
+    # elbow_x, elbow_y = machine1_to_plot(
+    #     elbow_x1,
+    #     elbow_y1
+    # )
+
+
+    # cur_x1, cur_y1 = machine1_to_plot(
+    #     cur_x1_raw,
+    #     cur_y1_raw
+    # )
+    # prox_join1 = np.array([prox_join_x, prox_join_y]) #this is only for plotting purposes, real prox_join is prox_join11
+
+
+    for printer_id, px in printer.items():
+        for i in px.codes:
+            for j in px.codes[i][1]:
+
+                x, y = px.px_to_p1(np.array(j))
+                x, y = x, y # for plotting purposes
+                #offset = [150, -150][printer_id - 1]
+
+                ax.annotate(
+                    f'p{printer_id}:{i}',
+                    xy=(y, x),
+                    fontsize=5
+                )
+
+
+    #all this needs to be in config
     cur_x1_raw = 300
     cur_y1_raw = 0
 
+    cur_x2_raw = 300
+    cur_y2_raw = 0
 
+    cur_x3_raw = 300
+    cur_y3_raw = 0
 
-
-    #all these are now in the plotting co-ordinates, not co-ordinates of p1
-
-    _, elbow_x1, elbow_y1 = inverse_kinematic(cur_x1_raw, cur_y1_raw, prox_join11, length_a1, length_b1)
-
-
-
-    prox_join_x, prox_join_y = machine1_to_plot(
-        prox_join11[0],
-        prox_join11[1]
-    )
-
-
-    elbow_x, elbow_y = machine1_to_plot(
-        elbow_x1,
-        elbow_y1
-    )
-
-
-    cur_x1, cur_y1 = machine1_to_plot(
-        cur_x1_raw,
-        cur_y1_raw
-    )
-    prox_join1 = np.array([prox_join_x, prox_join_y]) #this is only for plotting purposes, real prox_join is prox_join11
-
-
-
+    coord_raw = {
+        1: (cur_x1_raw, cur_y1_raw),
+        2: (cur_x2_raw, cur_y2_raw),
+        3: (cur_x3_raw, cur_y3_raw)
+    }
 
     proximal_width = data_width_to_points(ax, 10)
     distal_width = data_width_to_points(ax, 31.25)
 
-    line1, = ax.plot(
-        [prox_join1[1], elbow_y],
-        [prox_join1[0], elbow_x],
-        "bo-",
-        linewidth=proximal_width,
-        label="proximal arm1",
-    )
+    for px in printer:
+        printer[px].plot(ax, coord_raw[px][0], coord_raw[px][1], proximal_width, distal_width)
+
+    
 
 
-    line2, = ax.plot(
-        [elbow_y, cur_y1],
-        [elbow_x, cur_x1],
-        "ro-",
-        linewidth=distal_width,
-        label="distal arm1",
-    )
+
+
+
+    # line1, = ax.plot(
+    #     [prox_join1[1], elbow_y],
+    #     [prox_join1[0], elbow_x],
+    #     "bo-",
+    #     linewidth=proximal_width,
+    #     label="proximal arm1",
+    # )
+
+
+    # line2, = ax.plot(
+    #     [elbow_y, cur_y1],
+    #     [elbow_x, cur_x1],
+    #     "ro-",
+    #     linewidth=distal_width,
+    #     label="distal arm1",
+    # )
 
 
 
@@ -307,77 +348,98 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
 
 
 # Coordinates coming from printer
-    cur_x2_raw = 300
-    cur_y2_raw = 0
+
 
 
 
 
     #all these are co-odinates from plotting POV, not p2
 
-    _, elbow_x2, elbow_y2 = inverse_kinematic(
-        cur_x2_raw,
-        cur_y2_raw,
-        prox_join2,
-        length_a2,
-        length_b2
-    )
+    # _, elbow_x2, elbow_y2 = inverse_kinematic(
+    #     cur_x2_raw,
+    #     cur_y2_raw,
+    #     prox_join2,
+    #     length_a2,
+    #     length_b2
+    # )
 
 
 
-    prox_plot_x, prox_plot_y = machine2_to_plot(
-        prox_join2[0],
-        prox_join2[1]
-    )
+    # prox_plot_x, prox_plot_y = machine2_to_plot(
+    #     prox_join2[0],
+    #     prox_join2[1]
+    # )
 
-    elbow_plot_x, elbow_plot_y = machine2_to_plot(
-        elbow_x2,
-        elbow_y2
-    )
+    # elbow_plot_x, elbow_plot_y = machine2_to_plot(
+    #     elbow_x2,
+    #     elbow_y2
+    # )
 
-    cur_plot_x, cur_plot_y = machine2_to_plot(
-        cur_x2_raw,
-        cur_y2_raw
-    )
+    # cur_plot_x, cur_plot_y = machine2_to_plot(
+    #     cur_x2_raw,
+    #     cur_y2_raw
+    # )
 
 
-    line3, = ax.plot(
-        [prox_plot_y, elbow_plot_y],
-        [prox_plot_x, elbow_plot_x],
-        "bo-",
-        linewidth=proximal_width,
-        label="proximal arm2",
-    )
+    # line3, = ax.plot(
+    #     [prox_plot_y, elbow_plot_y],
+    #     [prox_plot_x, elbow_plot_x],
+    #     "bo-",
+    #     linewidth=proximal_width,
+    #     label="proximal arm2",
+    # )
 
-    line4, = ax.plot(
-        [elbow_plot_y, cur_plot_y],
-        [elbow_plot_x, cur_plot_x],
-        "ro-",
-        linewidth=distal_width,
-        label="distal arm2",
-    )
+    # line4, = ax.plot(
+    #     [elbow_plot_y, cur_plot_y],
+    #     [elbow_plot_x, cur_plot_x],
+    #     "ro-",
+    #     linewidth=distal_width,
+    #     label="distal arm2",
+    # )
 
 
     #precomputed k values for boundaries
 
-    elbow_joint_p1_f = 26
-    elbow_joint_p1_b = -26
-    distal_arm_p1_f = 246
-    distal_arm_p1_b = -26
-    prox_joint_p1_f = 8
-    prox_joint_p1_b = -8
-    proximal_arm_p1_f = 230
-    proximal_arm_p1_b = -8
 
-    elbow_joint_p2_f = -25
-    elbow_joint_p2_b = 25
-    distal_arm_p2_f = 253
-    distal_arm_p2_b = -25
-    prox_joint_p2_f = 8
-    prox_joint_p2_b = -8
-    proximal_arm_p2_f = 234
-    proximal_arm_p2_b = -8
+    #  boundaries = {1: {
 
+    #  },
+    #  2:{
+         
+    #  }}
+
+    BOUNDS = {
+        1: dict(
+            elbow_joint_f=26,
+            elbow_joint_b=-26,
+            distal_arm_f=246,
+            distal_arm_b=-26,
+            prox_joint_f=8,
+            prox_joint_b=-8,
+            proximal_arm_f=230,
+            proximal_arm_b=-8,
+        ),
+        2: dict(
+            elbow_joint_f=-25,
+            elbow_joint_b=25,
+            distal_arm_f=253,
+            distal_arm_b=-25,
+            prox_joint_f=8,
+            prox_joint_b=-8,
+            proximal_arm_f=234,
+            proximal_arm_b=-8,
+        ),
+        3: dict(
+                elbow_joint_f=26,
+                elbow_joint_b=-26,
+                distal_arm_f=246,
+                distal_arm_b=-26,
+                prox_joint_f=8,
+                prox_joint_b=-8,
+                proximal_arm_f=230,
+                proximal_arm_b=-8,
+            )
+    }
     
 
 
@@ -394,10 +456,8 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
 
 
 
-    perimeter_lines1 = []
-    perimeter_lines2 = []
-    check1 = True
-    check2 = True
+
+
 
 
 
@@ -405,7 +465,7 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
 
     fig.canvas.mpl_connect(
     "resize_event",
-    update_physical_linewidths()
+    update_physical_linewidths
     )
 
 
@@ -416,14 +476,33 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
 
 
 
-    
+    def base_artists(): #assembles the core list of objects for animation
+        artists = []
+
+        for px in printer.values():
+            artists.extend([
+                px.line1,
+                px.line2,
+            ])
+
+        artists.append(coordinate_text)
+
+        return artists
 
     def initialize():
-        line1.set_data([], [])
-        line2.set_data([], [])
-        line3.set_data([], [])
-        line4.set_data([], [])
+        for px in printer.values():
+            px.line1.set_data([], [])
+            px.line2.set_data([], [])
 
+        coordinate_text.set_text("Waiting for execution...")
+
+        return tuple(base_artists()) #need to use tuple form
+        
+        # line1.set_data([], [])
+        # line2.set_data([], [])
+        # line3.set_data([], [])
+        # line4.set_data([], [])
+        #how do i return the line objects inside list 'l' (there could be a variable number of them)?
         return line1, line2, line3, line4, coordinate_text
 
 
@@ -435,16 +514,23 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
 
 
     def animate(_):
-        nonlocal check1
-        nonlocal check2
+
+
 
         try:
-            pos1, pos2, p = position_queue1.get_nowait()
-            cur_x1_raw, cur_y1_raw = pos1
-            cur_x2_raw, cur_y2_raw = pos2
+            store_pos = dict()
+
+
+            frame = position_queue1.get_nowait()
+
+            *positions, p = frame
+
+            for i, j in enumerate(positions):
+                store_pos[i+1] = j
+
 
         except queue.Empty:
-            print(execution_finished.is_set())
+            print(f'execution_finished? {execution_finished.is_set()}')
             if execution_finished.is_set():
                 ani.event_source.stop()
                 coordinate_text.set_text("All executions finished")
@@ -454,7 +540,7 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
             else:
 
                 print('empty queue, delay occured \n\n\n\n\n\n\n\n\n')
-            return line1, line2, line3, line4, coordinate_text
+            return tuple(base_artists())
         
         for line in temporary_lines:
             line.remove()
@@ -465,570 +551,83 @@ def animation_script(codes1, codes2, position_queue1, execution_finished, stop_r
         temporary_circles.clear()
 
 
-        if clear_perim.is_set():
-            for perim in perimeter_lines1:
-                for i in perim:
-                    i.remove()
-            perimeter_lines1.clear()
-            for perim in perimeter_lines2:
-                for i in perim:
-                    i.remove()
-            perimeter_lines2.clear()
-            clear_perim.clear()
-            check1 = True
-            check2 = True
+
                 
 
+        
 
-        if p == 1:
-            # if check1 and perimeter_lines1:
-            #     lines = perimeter_lines1.pop(0)
-            #     for i in lines:
-            #         i.remove()
-            #     check1 = False
-            
+        cur_x_raw, cur_y_raw = store_pos[p]
+        cur_x_raw, cur_y_raw = cur_x_raw, cur_y_raw
+        px = printer[p]
+        prox1, elbow1, cur1 = px.coords_to_plot(cur_x_raw, cur_y_raw)
 
+        px.line1.set_data(
+            [prox1[1], elbow1[1]], #here and everywhere we switch places of x and y becaseu matplot needs it for plotting purposes
+            [prox1[0], elbow1[0]]
+        )
 
-            _, elbow_x1, elbow_y1 = inverse_kinematic(cur_x1_raw, cur_y1_raw, prox_join11, length_a1, length_b1)
-
-
-            prox_join_x, prox_join_y = machine1_to_plot(
-                prox_join11[0],
-                prox_join11[1]
-                )
-
-
-            elbow_x, elbow_y = machine1_to_plot(
-                elbow_x1,
-                elbow_y1
-            )
-
-
-            cur_x1, cur_y1 = machine1_to_plot(
-                cur_x1_raw,
-                cur_y1_raw
-            )
-            prox_join1 = np.array([prox_join_x, prox_join_y]) #this is only for plotting purposes, real prox_join is prox_join11
-
-            line1.set_data(
-                [prox_join1[1], elbow_y],
-                [prox_join1[0], elbow_x]
-            )
-
-            line2.set_data(
-                [elbow_y, cur_y1], #here we switch places of x and y becaseu matplot needs it for plotting purposes
-                [elbow_x, cur_x1]
-            )
-
-
-            #the k dervied lines
-            
-            v = np.array([
-                cur_x1 - elbow_x,
-                cur_y1 - elbow_y
-            ])
-
-            perp = np.array([
-                -v[1],
-                v[0]
-            ])
-            perp = perp / np.linalg.norm(perp)
-            v_norm = v/np.linalg.norm(v)
-
-            v2 = np.array([
-                elbow_x - prox_join1[0],
-                elbow_y - prox_join1[1]
-                
-            ])
-
-            perp2 = np.array([ 
-                -v2[1],
-                v2[0]
-            ])
-
-            perp2 = perp2/np.linalg.norm(perp2)
-            v_norm2 = v2/np.linalg.norm(v2)
-
-            point1 = np.array([elbow_x, elbow_y]) + elbow_joint_p1_f*perp + distal_arm_p1_b*v_norm
-            point2 = np.array([elbow_x, elbow_y]) + elbow_joint_p1_f*perp + distal_arm_p1_f*v_norm
-            point3 = np.array([elbow_x, elbow_y]) + elbow_joint_p1_b*perp + distal_arm_p1_b*v_norm
-            point4 = np.array([elbow_x, elbow_y]) + elbow_joint_p1_b*perp + distal_arm_p1_f*v_norm
-
-            distal1_l1, = ax.plot([point1[1], point2[1]],[point1[0], point2[0]], color = 'black')
-            distal1_l2, = ax.plot([point1[1], point3[1]],[point1[0], point3[0]], color = 'black')
-            distal1_l3, = ax.plot([point2[1], point4[1]],[point2[0], point4[0]], color = 'black')
-            distal1_l4, = ax.plot([point3[1], point4[1]],[point3[0], point4[0]], color = 'black')
-
-            point11 = np.array(prox_join1) + prox_joint_p1_f*perp2 + proximal_arm_p1_f*v_norm2
-            point22 = np.array(prox_join1) + prox_joint_p1_f*perp2 + proximal_arm_p1_b*v_norm2
-            point33 = np.array(prox_join1) + prox_joint_p1_b*perp2 + proximal_arm_p1_f*v_norm2
-            point44 = np.array(prox_join1) + prox_joint_p1_b*perp2 + proximal_arm_p1_b*v_norm2
-
-            proximal1_l1, = ax.plot([point11[1], point22[1]],[point11[0], point22[0]], color = 'black')
-            proximal1_l2, = ax.plot([point11[1], point33[1]],[point11[0], point33[0]], color = 'black')
-            proximal1_l3, = ax.plot([point22[1], point44[1]],[point22[0], point44[0]], color = 'black')
-            proximal1_l4, = ax.plot([point33[1], point44[1]],[point33[0], point44[0]], color = 'black')
-
-
-            ################ we are storing co-ordinates only that are from plot reference frame##############
-            
-            #will only keep track of boundaries when the queue is not empty and co-ordinates are being sent there
-            #will bring us time to record everything before perim_area is emptied
-            
-            #all this is only for pre-computing areas on simulation, won't be implemented in real implementation#
-
-
-
-            ax.plot(point1[1], point1[0], 'x', color = 'yellow')
-            ax.plot(point2[1], point2[0], 'x', color = 'green')
-            ax.plot(point3[1], point3[0], 'x', color = 'blue')
-            ax.plot(point4[1], point4[0], 'x', color = 'red')
+        px.line2.set_data(
+            [elbow1[1], cur1[1]], 
+            [elbow1[0], cur1[0]]
+        )
 
 
 
 
+        #the k dervied lines
+
+        lines_px = px.plot_bounds(
+            ax,
+            cur_x_raw,
+            cur_y_raw,
+            **BOUNDS[p]
+        )
 
 
 
+        # close = closest_point_on_segment([elbow_plot_y, elbow_plot_x], [cur_plot_y, cur_plot_x], [cur_x1, cur_y1])
+        # #this is very wrong, need to use machine1_to_plot here
+        # min_d = min([np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([cur_plot_y, cur_plot_x])), close[2], np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([elbow_plot_y, elbow_plot_x]))])
+        
 
 
-            proximal_width = data_width_to_points(ax, 10)
-            distal_width = data_width_to_points(ax, 31.25)
+        # coordinate_text.set_text(
+        # f"x_p1 = {cur_x1:.3f}\n"
+        # f"y_p1 = {cur_y1:.3f}\n"
+        # f"x_p2 = {cur_plot_y:.3f}\n"
+        # f"y_p2 = {cur_plot_x:.3f}\n"
+        # f"p = {p}\n\n"
+        # f'p1 to p2 nozzle: {np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([cur_plot_y, cur_plot_x]))}\n'
+        # f'p1 to p2 shortest point {close[2]}\n'
+        # f'p1 to p2 elbow: {np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([elbow_plot_y, elbow_plot_x]))}\n'
+        # f"queued = {position_queue1.qsize()}"
+        # )   
 
 
-            
-            
-            _, elbow_x2, elbow_y2 = inverse_kinematic(cur_x2_raw, cur_y2_raw, prox_join2, length_a2, length_b2)
-
-            elbow_plot_x, elbow_plot_y = machine2_to_plot(elbow_x2, elbow_y2)
-
-            prox_plot_x, prox_plot_y = machine2_to_plot(prox_join2[0], prox_join2[1])
-
-            cur_plot_x, cur_plot_y = machine2_to_plot(cur_x2_raw, cur_y2_raw)
-
-            line3.set_data(
-                [prox_plot_y, elbow_plot_y], 
-                [prox_plot_x, elbow_plot_x]
-                )
-
-            line4.set_data(
-                [elbow_plot_y, cur_plot_y],
-                [elbow_plot_x, cur_plot_x]
-                )
+        # closex, closey = machine1_to_plot(close[0][0], close[0][1])
 
 
+        ####dont use the thing below but us it as a template)
+        # t1, = ax.plot(
+        #     [cur_y1, closey],
+        #     [cur_x1, closex]    
+        # )
 
+        
+        circle1 = circle_p1_1(cur1[0], cur1[1])
+        ax.add_patch(circle1)
+        temporary_circles.append(circle1)
 
-            vv = np.asarray([
-                cur_plot_x - elbow_plot_x,
-                cur_plot_y - elbow_plot_y
-            ])
+        circle2 = circle_p1_2(elbow1[0], elbow1[1])
+        ax.add_patch(circle2)
+        temporary_circles.append(circle2)
 
-            perpp = np.asarray([
-                -vv[1],
-                vv[0]
-            ])
-
-
-            perpp = perpp/np.linalg.norm(perpp)
-            vv_norm = vv/np.linalg.norm(vv)
-
-            vv2 = np.array([
-                elbow_plot_x - prox_plot_x,
-                elbow_plot_y - prox_plot_y
-                
-            ])
-
-            perpp2 = np.array([ 
-                -vv2[1],
-                vv2[0]
-            ])
-
-            perpp2 = perpp2/np.linalg.norm(perpp2)
-            vv_norm2 = vv2/np.linalg.norm(vv2)
-
-
-            point1_2 = np.array([elbow_plot_x, elbow_plot_y]) + elbow_joint_p2_f*perpp + distal_arm_p2_b*vv_norm
-            point2_2 = np.array([elbow_plot_x, elbow_plot_y]) + elbow_joint_p2_f*perpp + distal_arm_p2_f*vv_norm
-            point3_2 = np.array([elbow_plot_x, elbow_plot_y]) + elbow_joint_p2_b*perpp + distal_arm_p2_b*vv_norm
-            point4_2 = np.array([elbow_plot_x, elbow_plot_y]) + elbow_joint_p2_b*perpp + distal_arm_p2_f*vv_norm
-
-  
-            #Printer 1 rectangle
-            rect1 = [
-                point1,
-                point2,
-                point4,
-                point3
-            ]
-
-            # Printer 2 rectangle
-            rect2 = [
-                point1_2,
-                point2_2,
-                point4_2,
-                point3_2
-            ]
-
-
-
-            perim_area.append([
-                f'p{p}', 
-                (cur_x1_raw, cur_y1_raw),
-                point1,
-                point2,
-                point3,
-                point4,
-            ])
-
-
+        #the temperatory lines are for distances i think
 
 
             
 
-            close = closest_point_on_segment([elbow_plot_y, elbow_plot_x], [cur_plot_y, cur_plot_x], [cur_x1, cur_y1])
-            #this is very wrong, need to use machine1_to_plot here
-            min_d = min([np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([cur_plot_y, cur_plot_x])), close[2], np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([elbow_plot_y, elbow_plot_x]))])
-            
-
-
-            coordinate_text.set_text(
-            f"x_p1 = {cur_x1:.3f}\n"
-            f"y_p1 = {cur_y1:.3f}\n"
-            f"x_p2 = {cur_plot_y:.3f}\n"
-            f"y_p2 = {cur_plot_x:.3f}\n"
-            f"p = {p}\n\n"
-            f'p1 to p2 nozzle: {np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([cur_plot_y, cur_plot_x]))}\n'
-            f'p1 to p2 shortest point {close[2]}\n'
-            f'p1 to p2 elbow: {np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([elbow_plot_y, elbow_plot_x]))}\n'
-            f"queued = {position_queue1.qsize()}"
-            )   
-
-
-            closex, closey = machine1_to_plot(close[0][0], close[0][1])
-
-            t1, = ax.plot(
-                [cur_y1, closey],
-                [cur_x1, closex]    
-            )
-            circle1 = circle_p1_1(cur_x1, cur_y1)
-            ax.add_patch(circle1)
-            temporary_circles.append(circle1)
-
-            circle2 = circle_p1_2(elbow_x, elbow_y)
-            ax.add_patch(circle2)
-            temporary_circles.append(circle2)
-
-            circle3 = circle_p2_1(cur_plot_x, cur_plot_y)
-            ax.add_patch(circle3)
-            temporary_circles.append(circle3)
-
-            circle4 = circle_p2_2(elbow_plot_x, elbow_plot_y)
-            ax.add_patch(circle4)
-            temporary_circles.append(circle4)
-
-
-            t2, = ax.plot(
-                [cur_y1, cur_plot_y],
-                [cur_x1, cur_plot_x]
-            )
-            t3, = ax.plot(
-                [cur_y1, elbow_plot_y],
-                [cur_x1, elbow_plot_x],
-                color = 'y'
-            ) 
-            temporary_lines.extend([t1, t2, t3])
-            perimeter_lines1.append([distal1_l1, distal1_l2, distal1_l3, distal1_l4, proximal1_l1, proximal1_l2, proximal1_l3, proximal1_l4])
-            if cur_x1_raw == 300.0 and cur_y1_raw == 0.0:
-
-                lines = perimeter_lines1.pop(0)
-                for i in lines:
-                    i.remove()
-
-
-            
-
-
-
-        elif p == 2:
-            # if check2 and perimeter_lines2:
-            #     lines = perimeter_lines2.pop(0)
-            #     for i in lines:
-            #         i.remove()
-            #     check2 = False
-
-            _, elbow_x2, elbow_y2 = inverse_kinematic(cur_x2_raw, cur_y2_raw, prox_join2, length_a2, length_b2)
-
-            elbow_plot_x, elbow_plot_y = machine2_to_plot(elbow_x2, elbow_y2)
-
-            prox_plot_x, prox_plot_y = machine2_to_plot(prox_join2[0], prox_join2[1])
-
-            cur_plot_x, cur_plot_y = machine2_to_plot(cur_x2_raw, cur_y2_raw)
-
-            line3.set_data(
-                [prox_plot_y, elbow_plot_y], 
-                [prox_plot_x, elbow_plot_x]
-            )
-
-            line4.set_data(
-                [elbow_plot_y, cur_plot_y],
-                [elbow_plot_x, cur_plot_x]
-                )
-
-            vv = np.asarray([
-                cur_plot_x - elbow_plot_x,
-                cur_plot_y - elbow_plot_y
-            ])
-
-            perpp = np.asarray([
-                -vv[1],
-                vv[0]
-            ])
-
-
-            perpp = perpp/np.linalg.norm(perpp)
-            vv_norm = vv/np.linalg.norm(vv)
-
-            vv2 = np.array([
-                elbow_plot_x - prox_plot_x,
-                elbow_plot_y - prox_plot_y
-                
-            ])
-
-            perpp2 = np.array([ 
-                -vv2[1],
-                vv2[0]
-            ])
-
-            perpp2 = perpp2/np.linalg.norm(perpp2)
-            vv_norm2 = vv2/np.linalg.norm(vv2)
-
-
-            point1 = np.array([elbow_plot_x, elbow_plot_y]) + elbow_joint_p2_f*perpp + distal_arm_p2_b*vv_norm
-            point2 = np.array([elbow_plot_x, elbow_plot_y]) + elbow_joint_p2_f*perpp + distal_arm_p2_f*vv_norm
-            point3 = np.array([elbow_plot_x, elbow_plot_y]) + elbow_joint_p2_b*perpp + distal_arm_p2_b*vv_norm
-            point4 = np.array([elbow_plot_x, elbow_plot_y]) + elbow_joint_p2_b*perpp + distal_arm_p2_f*vv_norm
-
-            distal2_l1, = ax.plot([point1[1], point2[1]],[point1[0], point2[0]], color = 'black')
-            distal2_l2, = ax.plot([point1[1], point3[1]],[point1[0], point3[0]], color = 'black')
-            distal2_l3, = ax.plot([point2[1], point4[1]],[point2[0], point4[0]], color = 'black')
-            distal2_l4, = ax.plot([point3[1], point4[1]],[point3[0], point4[0]], color = 'black')
-
-            point11 = np.array([prox_plot_x, prox_plot_y]) + prox_joint_p2_f*perpp2 + proximal_arm_p2_f*vv_norm2
-            point22 = np.array([prox_plot_x, prox_plot_y]) + prox_joint_p2_f*perpp2 + proximal_arm_p2_b*vv_norm2
-            point33 = np.array([prox_plot_x, prox_plot_y]) + prox_joint_p2_b*perpp2 + proximal_arm_p2_f*vv_norm2
-            point44 = np.array([prox_plot_x, prox_plot_y]) + prox_joint_p2_b*perpp2 + proximal_arm_p2_b*vv_norm2
-
-            proximal2_l1, = ax.plot([point11[1], point22[1]],[point11[0], point22[0]], color = 'black')
-            proximal2_l2, = ax.plot([point11[1], point33[1]],[point11[0], point33[0]], color = 'black')
-            proximal2_l3, = ax.plot([point22[1], point44[1]],[point22[0], point44[0]], color = 'black')
-            proximal2_l4, = ax.plot([point33[1], point44[1]],[point33[0], point44[0]], color = 'black')
-
-            ################ we are storing co-ordinates only that are from plot reference frame##############
-            
-            #will only keep track of boundaries when the queue is not empty and co-ordinates are being sent there
-            #will bring us time to record everything before perim_area is emptied
-            
-            #all this is only for pre-computing areas on simulation, won't be implemented in real implementation#
-
-            elbow_boundary2 = []
-
-
-
-            ax.plot(point1[1], point1[0], 'x', color = 'yellow')
-            ax.plot(point2[1], point2[0], 'x', color = 'yellow')
-            ax.plot(point3[1], point3[0], 'x', color = 'yellow')
-            ax.plot(point4[1], point4[0], 'x', color = 'yellow')
-
-
-
-
-
-
-
-
-
-
-
-
-            
-            proximal_width = data_width_to_points(ax, 10)
-            distal_width = data_width_to_points(ax, 31.25)
-
-
-            
-
-            
-
-
-            _, elbow_x1, elbow_y1 = inverse_kinematic(cur_x1_raw, cur_y1_raw, prox_join11, length_a1, length_b1)
-
-
-            prox_join_x, prox_join_y = machine1_to_plot(
-                prox_join11[0],
-                prox_join11[1]
-                )
-
-
-            elbow_x, elbow_y = machine1_to_plot(
-                elbow_x1,
-                elbow_y1
-            )
-
-
-            cur_x1, cur_y1 = machine1_to_plot(
-                cur_x1_raw,
-                cur_y1_raw
-            )
-            prox_join1 = np.array([prox_join_x, prox_join_y]) #this is only for plotting purposes, real prox_join is prox_join11
-
-            line1.set_data(
-                [prox_join1[1], elbow_y],
-                [prox_join1[0], elbow_x]
-            )
-
-            line2.set_data(
-                [elbow_y, cur_y1], #here we switch places of x and y becaseu matplot needs it 
-                [elbow_x, cur_x1]
-            )
-
-
-
-
-            
-            v = np.array([
-                cur_x1 - elbow_x,
-                cur_y1 - elbow_y
-            ])
-
-            perp = np.array([
-                -v[1],
-                v[0]
-            ])
-            perp = perp / np.linalg.norm(perp)
-            v_norm = v/np.linalg.norm(v)
-
-            v2 = np.array([
-                elbow_x - prox_join1[0],
-                elbow_y - prox_join1[1]
-                
-            ])
-
-            perp2 = np.array([ 
-                -v2[1],
-                v2[0]
-            ])
-
-            perp2 = perp2/np.linalg.norm(perp2)
-            v_norm2 = v2/np.linalg.norm(v2)
-
-            point1_1 = np.array([elbow_x, elbow_y]) + elbow_joint_p1_f*perp + distal_arm_p1_b*v_norm
-            point2_1 = np.array([elbow_x, elbow_y]) + elbow_joint_p1_f*perp + distal_arm_p1_f*v_norm
-            point3_1 = np.array([elbow_x, elbow_y]) + elbow_joint_p1_b*perp + distal_arm_p1_b*v_norm
-            point4_1 = np.array([elbow_x, elbow_y]) + elbow_joint_p1_b*perp + distal_arm_p1_f*v_norm
-
-            #Printer 2 rectangle
-            rect2 = [
-                point1,
-                point2,
-                point4,
-                point3
-            ]
-
-            # Printer 1 rectangle
-            rect1 = [
-                point1_1,
-                point2_1,
-                point4_1,
-                point3_1
-            ]
-
-
-
-            perim_area.append([
-                f'p{p}',
-                (cur_x2_raw, cur_y2_raw),
-                point1,
-                point2,
-                point3,
-                point4,
-            ])
-
-
-
- 
-
-            close = closest_point_on_segment([elbow_x, elbow_y], [cur_x1, cur_y1], [cur_plot_y, cur_plot_x])
-            
-            min_d = min([np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([cur_plot_y, cur_plot_x])), close[2], np.linalg.norm(np.array([cur_x1, cur_y1]) - np.array([elbow_plot_y, elbow_plot_x]))])
-            
-  
-
-
-            coordinate_text.set_text(
-            f"x_p1 = {cur_plot_x:.3f}\n"
-            f"y_p1 = {cur_plot_y:.3f}\n"
-            f"x_p2 = {cur_x1:.3f}\n"
-            f"y_p2 = {cur_y1:.3f}\n"
-            f"p = {p}\n\n"
-            f'p2 to p1 nozzle: {np.linalg.norm(np.array([cur_plot_x, cur_plot_y]) - np.array([cur_y1, cur_x1]))}\n'
-            f'p2 to p1 shortest point {close[2]}\n'
-            f'p2 to p1 elbow: {np.linalg.norm(np.array([cur_plot_x, cur_plot_y]) - np.array([elbow_y, elbow_x]))}\n'
-            f"queued = {position_queue1.qsize()}"
-            )   
-
-
-            closex, closey = machine2_to_plot(close[0][0], close[0][1])
-
-            t1, = ax.plot(
-                [cur_plot_y, close[0][1]],
-                [cur_plot_x, close[0][0]]
-                
-            )
-            circle1 = circle_p1_1(cur_x1, cur_y1)
-            ax.add_patch(circle1)
-            temporary_circles.append(circle1)
-
-            circle2 = circle_p1_2(elbow_x, elbow_y)
-            ax.add_patch(circle2)
-            temporary_circles.append(circle2)
-
-            circle3 = circle_p2_1(cur_plot_x, cur_plot_y)
-            ax.add_patch(circle3)
-            temporary_circles.append(circle3)
-
-            circle4 = circle_p2_2(elbow_plot_x, elbow_plot_y) #the function inverts the cor-dinate mapping
-            ax.add_patch(circle4)
-            temporary_circles.append(circle4)
-
-
-            t2, = ax.plot(
-                [cur_plot_y, cur_y1],
-                [cur_plot_x, cur_x1]
-                
-            )
-
-            t3, = ax.plot(
-                [cur_plot_y, elbow_y],
-                [cur_plot_x, elbow_x],
-                color = 'y'
-                
-            )
-
-            temporary_lines.extend([t1, t2, t3])
-            perimeter_lines2.append([distal2_l1, distal2_l2, distal2_l3, distal2_l4, proximal2_l1, proximal2_l2, proximal2_l3, proximal2_l4])
-
-
-
-            if cur_x2_raw == 300.0 and cur_y2_raw == 0.0:
-
-                lines = perimeter_lines2.pop(0)
-                for i in lines:
-                    i.remove()
-
-            
-
-        return line1, line2, line3, line4, coordinate_text, *temporary_lines, *temporary_circles
+        return tuple(base_artists() + temporary_lines + temporary_circles)
 
         
 
