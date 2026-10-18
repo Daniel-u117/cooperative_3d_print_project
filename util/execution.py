@@ -6,7 +6,7 @@ import re
 import socket
 import time
 
-from .network_utils import get_status, reconnect_to_ambots, tcp_reachable, current_wifi, run_netsh
+from .network_utils import RobotConnection, get_status, reconnect_to_ambots, tcp_reachable, current_wifi, run_netsh
 
 
 
@@ -34,9 +34,10 @@ RECOVERY_TIMEOUT = 180.0
 RECOVERY_FEEDRATE = 1500.0
 RECOVERY_TOLERANCE = 0.25
  
-def recover_printers(ip, stop_requested):
+def recover_printers(ip, stop_requested, connection=None):
     """Run configured routes serially; return observed final raw X/Y positions."""
     import math
+    connection = connection or RobotConnection(ip[1], ip[2])
 
     routes = []
     seen = set()
@@ -68,7 +69,7 @@ def recover_printers(ip, stop_requested):
                 raise RuntimeError("Recovery cancelled")
             if time.monotonic() >= deadline:
                 raise TimeoutError("Recovery exceeded its deadline")
-            statuses, _ = get_status()
+            statuses, _ = get_status(connection=connection)
             if any(statuses[q - 1] != "I" for q in ip):
                 raise RuntimeError("Recovery requires both printers idle")
 
@@ -110,7 +111,7 @@ def recover_printers(ip, stop_requested):
 
             # Verify in the same native coordinate convention as get_status.
             # This read is AFTER the firmware barrier, not during movement.
-            _, coordinates = get_status()
+            _, coordinates = get_status(connection=connection)
             actual = tuple(map(float, coordinates[printer_id - 1][:2]))
             target = (target_x, target_y)
             if len(actual) != 2 or any(
@@ -123,7 +124,7 @@ def recover_printers(ip, stop_requested):
     while not stop_requested.is_set():
         if time.monotonic() >= deadline:
             raise TimeoutError("Printers did not settle idle after recovery")
-        statuses, coordinates = get_status()
+        statuses, coordinates = get_status(connection=connection)
         if all(statuses[q - 1] == "I" for q in ip):
             observed = {
                 q: tuple(map(float, coordinates[q - 1][:2])) for q in ip
@@ -156,7 +157,8 @@ def recover_printers(ip, stop_requested):
 
 
 def execution_worker(ip, execution_request_queue, execution_result_queue,
-                     tracker_control_queue, stop_requested, error_queue):
+                     tracker_control_queue, stop_requested, error_queue, connection=None):
+    connection = connection or RobotConnection(ip[1], ip[2])
     try:
         while not stop_requested.is_set():
             try:
@@ -169,7 +171,7 @@ def execution_worker(ip, execution_request_queue, execution_result_queue,
                 if filename == "__recover__":
                     if p is not None:
                         raise ValueError("Recovery request must be (__recover__, None)")
-                    observed = recover_printers(ip, stop_requested)
+                    observed = recover_printers(ip, stop_requested, connection=connection)
                     execution_result_queue.put(("recovered", observed))
                     continue
 
@@ -180,11 +182,11 @@ def execution_worker(ip, execution_request_queue, execution_result_queue,
                 # Check connectivity before sending. get_status already has
                 # its own reconnect attempts; use the helper if it still fails.
                 try:
-                    statuses, _ = get_status()
+                    statuses, _ = get_status(connection=connection)
                 except (requests.RequestException, ConnectionError):
-                    if reconnect_to_ambots() is not True:
+                    if reconnect_to_ambots(connection=connection) is not True:
                         raise ConnectionError("Could not reconnect to AMBOTS")
-                    statuses, _ = get_status()
+                    statuses, _ = get_status(connection=connection)
 
                 if statuses[p - 1] != "I":
                     raise RuntimeError(f"p{p} is no longer idle")

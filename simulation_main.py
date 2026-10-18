@@ -1,3 +1,5 @@
+import argparse
+import math
 import multiprocessing as mp
 import queue
 import time
@@ -23,13 +25,17 @@ from matplotlib.ticker import FuncFormatter
 from matplotlib.patches import Circle
 from dataclasses import dataclass
 
-from util.network_utils import run_netsh, current_wifi, tcp_reachable, reconnect_to_ambots
+from util.network_utils import RobotConnection, check_robot_connection
+from util.homing import home_robots
 from kinematics.animation import inverse_kinematic, animation_script, machine1_to_plot, machine2_to_plot, closest_point_on_segment
 from util.tracking import track
 from util.command_script import command_script, polygon_at_position
 from util.execution import execution_worker
 from conflict_detect.collision_utils import segments_intersect, segment_intersects_circle, point_in_quad, rectangles_intersect, extract_xy, xy_points_after_m107, write_sim_file, sim_one_px, sim_px
 from discretization.file_utils import parse_beg, parse_end, parse_mid
+
+from project_paths import INPUT_DIR, OUTPUT_DIR
+from util.gcode_input import gcode_files, read_print_points
 
 from dataclasses import dataclass, field
 import numpy as np
@@ -48,6 +54,7 @@ class SimConfig:
     px_fold: dict[int, Path]
     out_px: dict[int, Path]
     coord_pattern: dict
+    log_dir: Path = OUTPUT_DIR
 
 
 
@@ -368,7 +375,40 @@ class Printer:
         return bounds
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Prepare G-code and preview cooperative printing locally.")
+    parser.add_argument("--mode", choices=("simulate", "prepare", "connect", "printers"), default="simulate",
+                        help="simulate: offline preview; connect: check robot connections; printers: upload, home, and run robots.")
+    parser.add_argument("--input-dir", type=Path, default=INPUT_DIR)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--headless", action="store_true", help="Run local simulation without a plot window")
+    parser.add_argument("--printer-1", default="192.168.0.15", help="First robot address")
+    parser.add_argument("--printer-2", default="192.168.0.16", help="Second robot address")
+    parser.add_argument("--wifi-profile", help="Saved Windows Wi-Fi profile to use if robots are unreachable")
+    parser.add_argument("--wifi-interface", default="Wi-Fi")
+    parser.add_argument("--homing-timeout", type=float, default=180.0,
+                        help="Maximum homing wait per robot in seconds (default: 180)")
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.homing_timeout) or args.homing_timeout <= 0:
+        parser.error("--homing-timeout must be a finite positive number")
+    connection = RobotConnection(args.printer_1, args.printer_2,
+                                 password=os.environ.get("AMBOTS_PASSWORD", "reprap"),
+                                 wifi_profile=args.wifi_profile,
+                                 wifi_interface=args.wifi_interface)
+    if args.mode == "connect":
+        check_robot_connection(connection)
+        print("Both robots connected. No files uploaded or movement commanded.")
+        return
+    if args.headless and args.mode == "printers":
+        parser.error("--headless is supported only for local simulation or preparation")
+    folder = args.input_dir.resolve()
+    output_dir = args.output_dir.resolve()
+    source_files = gcode_files(folder)
+    # Validate all sources before producing any output.
+    for source in source_files:
+        read_print_points(source)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    transformed_dir = output_dir / "transformed"
     prox_join2 = np.array([151.16978, -53.04552])
     length_a2 = 225.39945
     length_b2 = 227.54048
@@ -415,7 +455,7 @@ def main():
 
 
 
-    folder = Path(r"c:\Users\nural\python2\group-of-code2\ulti_maker")
+    # All generated data stays under the chosen output directory.
 
 
     def gcode_number(file_path):
@@ -428,43 +468,12 @@ def main():
     
 
 
-    def read_gcode_points(file_path):
-        x_pattern = re.compile(r"\bX\s*(-?(?:\d+(?:\.\d*)?|\.\d+))")
-        y_pattern = re.compile(r"\bY\s*(-?(?:\d+(?:\.\d*)?|\.\d+))")
-        points = []
-        
-        with open(file_path, 'r') as r:
-            line = r.readline().strip()
-            while line != 'M107':
-                line = r.readline().strip()
-
-            line = r.readline().strip()
-
-
-
-            while line:
-                x_match = x_pattern.search(line)
-                y_match = y_pattern.search(line)
-                # Only use lines containing BOTH X and Y
-                if x_match and y_match:
-
-                    x = float(x_match.group(1))
-                    y = float(y_match.group(1))
-
-                    points.append((x, y))
-
-                line = r.readline().strip()
-        return points
-    
-                
-                
-
-
+    read_gcode_points = read_print_points
 
     def px_files(p, folder, printer):
 
-        output_fold = folder / f"p{p}"
-        output_fold.mkdir(exist_ok=True)
+        output_fold = transformed_dir / f"p{p}"
+        output_fold.mkdir(parents=True, exist_ok=True)
 
         px = printer[p]
 
@@ -494,7 +503,7 @@ def main():
             return str(value)
 
 
-        for file_path in folder.iterdir():
+        for file_path in source_files:
 
             if not file_path.is_file():
                 continue
@@ -547,7 +556,7 @@ def main():
     #px_files(3, folder, printer)
 
     # 1. Define your base directory properly using raw strings
-    base_dir = Path(r"c:\Users\nural\python2\group-of-code2\sim")
+    base_dir = output_dir / "boundaries_store"
 
     # 2. Use mkdir(parents=True, exist_ok=True) to prevent crashes if folders exist
     
@@ -556,7 +565,7 @@ def main():
         y_pattern = re.compile(r"\bY\s*(-?(?:\d+(?:\.\d*)?|\.\d+))")
         path_p1 = base_dir / f"p{p}"
         path_p1.mkdir(parents=True, exist_ok=True)
-        for i in os.listdir(folder / f'p{p}'):
+        for i in (source.name for source in source_files):
 
             points1 = read_gcode_points(folder / f'p{p}' / f'{i}')
             
@@ -579,6 +588,8 @@ def main():
             ).simplify(1.0)
 
             #boundary_points = np.array(object.exterior.coords) #returns (5,2) array so only 5 data points along the boundary
+            if object.geom_type != "Polygon" or object.is_empty:
+                raise ValueError(f"{i}: XY points do not form a polygon")
             boundary = object.exterior
 
 
@@ -589,7 +600,6 @@ def main():
                 for z in range(N+1)
             ])
 
-            print(f' boundary points {boundary_points[:, 0], boundary_points[:, 1]}')
 
             # 3. Define the filename (replacing the missing 'i')
             filename = f"{i}" 
@@ -601,12 +611,11 @@ def main():
                     # Added \n so each coordinate pair goes on a new line
                     w.write(f"X{x} Y{y}\n") 
 
-            print(f'boundary point shape {boundary_points.shape}')
 
 
 
-    processing(1, base_dir, folder)
-    processing(2, base_dir, folder)
+    processing(1, base_dir, transformed_dir)
+    processing(2, base_dir, transformed_dir)
     #processing(3, base_dir, folder)
 
 
@@ -617,7 +626,7 @@ def main():
 
 
 
-    sim_fold = Path(r"C:\Users\nural\python2\sim_fold")
+    sim_fold = output_dir / "sim_fold"
     sim_fold.mkdir(parents=True, exist_ok=True)
 
 
@@ -628,8 +637,8 @@ def main():
         "Y": re.compile(r"\bY\s*(-?(?:\d+(?:\.\d*)?|\.\d+))"),
     }
     px_fold = {
-        1: Path(r"C:\Users\nural\python2\group-of-code2\boundaries_store\p1"),
-        2: Path(r"C:\Users\nural\python2\group-of-code2\boundaries_store\p2"),
+        1: base_dir / "p1",
+        2: base_dir / "p2",
     }
 
     out_px = {
@@ -645,50 +654,21 @@ def main():
         px_fold=px_fold,
         out_px=out_px,
         coord_pattern=coord_pattern,
+        log_dir=output_dir,
     )
 
 
 
-    folder = Path(r'C:\Users\nural\python2\group-of-code2')
+    target_fold = {p: output_dir / "processed" / f"p{p}" for p in printer}
+    for p, target in target_fold.items():
+        target.mkdir(parents=True, exist_ok=True)
+        for source in source_files:
+            transformed = transformed_dir / f"p{p}" / source.name
+            parse_beg(transformed, target)
+            parse_mid(transformed, target)
+            parse_end(transformed, target)
 
-
-    
-
-
-    '''this is for when we will send commands to the printers'''
-
-
-
-
-    #later needs to be automated
-    target_folder1 = Path(r'c:\Users\nural\python2\processed\p1')
-    target_folder1.mkdir(exist_ok=True)
-
-    target_folder2 = Path(r'c:\Users\nural\python2\processed\p2')
-    target_folder2.mkdir(exist_ok=True)
-
-    target_fold = {
-        1: Path(r'c:\Users\nural\python2\processed\p1'),
-        2: Path(r'c:\Users\nural\python2\processed\p2')
-    }
-    for a in target_fold.values():
-        a.mkdir(exist_ok=True)
-
-
-    for i in printer.keys():
-        for j in os.listdir(Path(fr'c:\Users\nural\python2\group-of-code2\ulti_maker\p{i}')):
-            parse_beg(Path(fr'c:\Users\nural\python2\group-of-code2\ulti_maker\p{i}') / j, target_fold[i], target_fold[i])
-            parse_mid(Path(fr'c:\Users\nural\python2\group-of-code2\ulti_maker\p{i}') / j, target_fold[i], target_fold[i])
-            parse_end(Path(fr'c:\Users\nural\python2\group-of-code2\ulti_maker\p{i}') / j, target_fold[i], target_fold[i])
-
-
-
-    ip1 = '192.168.0.15'
-    ip2 = '192.168.0.16'
-    ip = {
-        1: ip1,
-        2: ip2
-    }
+    ip = connection.ip
 
 
 
@@ -712,7 +692,7 @@ def main():
                     x = float(x_match.group(1))
                     y = float(y_match.group(1))
                     #the files that contains the co-ordinates of the points should also include the min/max co-ordinates just in case
-                    if np.linalg.norm(np.array([x - prox_join[0], y - prox_join[1]])) < length_a + length_b:
+                    if abs(length_a - length_b) < np.linalg.norm(np.array([x - prox_join[0], y - prox_join[1]])) < length_a + length_b:
                         points.append((x, y))
                     else:
                         check = False
@@ -726,7 +706,7 @@ def main():
 
 
 
-    folder_sim = Path(r'C:\Users\nural\python2\group-of-code2\boundaries_store')
+    folder_sim = base_dir
 
 
 
@@ -734,7 +714,7 @@ def main():
 
         path = folder_sim / f'p{printer_id}'
 
-        for file_name in os.listdir(path):
+        for file_name in (source.name for source in source_files):
             read_gcode_points(
                 px,
                 path / file_name,
@@ -745,51 +725,38 @@ def main():
 
 
 
-    for z in printer.values():
-        print(z.codes)
+    print(f"Prepared {len(source_files)} input files in {output_dir}")
+    for p, px in printer.items():
+        print(f"Printer {p}: {len(px.codes)} reachable regions")
+    if args.mode == "prepare":
+        return
+    if args.mode == "simulate":
+        from util.offline_simulation import run_offline
+        return run_offline(printer, config, headless=args.headless)
 
-
-
-
-
-
-    # #if you are connected to AMBOTS wifi, you need to first initiate connection with rr_connect
-    
-
-
-
-
-
-
-
-
-
-    # for now i am just uploading everything to both printers,
-
-
-    '''this stage of uploading needs to occur after reachability filter'''
-
-
-
-
-
+    # Only explicit --mode printers reaches uploads, homing, and live workers.
+    statuses, _ = check_robot_connection(connection)
+    if any(status != "I" for status in statuses):
+        raise RuntimeError("Both robots must be idle before uploading or homing")
+    print("Connected. Uploading prepared G-code, then homing and starting live execution.")
     for i in target_fold.keys():
-        for j in os.listdir(target_fold[i]):
+        for j in (f"{source.stem}_{stage}.gcode" for source in source_files for stage in ("b", "m", "e")):
             ch = j[:-8] + '.gcode'
             if ch in printer[i].codes.keys():
                 target = target_fold[i] / j
                 print(target)
-                print(requests.get(f'http://{ip[i]}/rr_connect?password=reprap').json())
                 with open(target, "rb") as o:
                     response = requests.post(
                         f"http://{ip[i]}/rr_upload",
                         params={"name": f"0:/gcodes/sub_directory/{j}"},
                         data=o,
-                        timeout=1000
+                        timeout=60
                     )
 
-                print(response.text)
-                o.close()
+                response.raise_for_status()
+                reply = response.json()
+                if not isinstance(reply, dict) or reply.get("err") != 0:
+                    raise RuntimeError(f"Upload failed for robot {i}: {j}")
         
         
 
@@ -824,21 +791,7 @@ def main():
 
 
 
-    requests.get('http://192.168.0.15/rr_gcode', params = {'gcode':'G28'})
-    time.sleep(45)
-    requests.get('http://192.168.0.16/rr_gcode', params = {'gcode':'G28'})
-
-    time.sleep(45)
-
-
-
-
-
-
-
-    # ########################################################################################
-
-
+    home_robots(connection, timeout=args.homing_timeout)
 
     context = mp.get_context("spawn")
     position_queue1 = context.Queue(maxsize=1)
@@ -852,7 +805,6 @@ def main():
     tracker_control_queue = context.Queue()
     printing_queue = context.Queue()
 
-    ip = {1: "192.168.0.15", 2: "192.168.0.16"}
     if set(printer) != set(ip):
         raise ValueError("The supplied get_status() supports only p1 and p2")
     manager = context.Manager()
@@ -864,6 +816,7 @@ def main():
         target=execution_worker,
         args=(ip, execution_request_queue, execution_result_queue,
             tracker_control_queue, stop_requested, error_queue),
+        kwargs={"connection": connection},
     )
     track_process = context.Process(
         target=track,
@@ -873,6 +826,7 @@ def main():
             "printer": printer,
             "store_polygons": store_polygons,
             "polygon_at_position": polygon_at_position,
+            "connection": connection,
         },
     )
     command_process = context.Process(
@@ -968,4 +922,7 @@ def main():
 
 if __name__ == "__main__":
     mp.freeze_support()
-    main()
+    try:
+        main()
+    except (ValueError, FileNotFoundError, ConnectionError, TimeoutError, RuntimeError, requests.RequestException) as error:
+        raise SystemExit(str(error)) from error

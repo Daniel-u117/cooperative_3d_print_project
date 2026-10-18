@@ -6,7 +6,7 @@ import numpy as np
 import queue
 from kinematics.animation import closest_point_on_segment
 import requests
-from util.network_utils import run_netsh, current_wifi, tcp_reachable, reconnect_to_ambots, get_status
+from util.network_utils import RobotConnection, run_netsh, current_wifi, tcp_reachable, reconnect_to_ambots, get_status
 import traceback
 
 import time
@@ -46,14 +46,15 @@ def estimate_extrusion_rate(position, now, previous):
 
 
 def track(ip, store_coords, tracker_event_queue, tracker_control_queue,
-          printing_queue, stop_requested, error_queue, position_queue1, printer = None, store_polygons = None, polygon_at_position = None):
+          printing_queue, stop_requested, error_queue, position_queue1, printer = None, store_polygons = None, polygon_at_position = None, connection=None):
+    connection = connection or RobotConnection(ip[1], ip[2])
     # One small state dictionary prevents duplicate free messages:
     # free -> queued (includes being analyzed) -> watch -> printing -> queued.
     # "no print" parks a printer; it cannot be silently requeued.
     state = {p: "free" for p in ip}
     try:
         while not stop_requested.is_set():
-            statuses, machine_coords = get_status()
+            statuses, machine_coords = get_status(connection=connection)
 
             for p in ip:
 
@@ -94,7 +95,7 @@ def track(ip, store_coords, tracker_event_queue, tracker_control_queue,
                 #         move = sample['move']
                 #         axes = {axis["letter"]: axis for axis in move["axes"]}
 
-                #         statuses, machine_coords = get_status()
+                #         statuses, machine_coords = get_status(connection=connection)
                         
                 #         frame = [
                 #         (float(machine_coords[q - 1][0]),
@@ -151,7 +152,7 @@ def track(ip, store_coords, tracker_event_queue, tracker_control_queue,
                     previous_job_file = None
                     previous_extruder_sample = None
                     while not stop_requested.is_set():
-                        response = requests.get(f"http://{ip[p]}/rr_model?flags=d99fn")
+                        response = requests.get(f"http://{ip[p]}/rr_model?flags=d99fn", timeout=5)
 
                         sample = response.json()["result"]
                         now = time.monotonic()
@@ -272,7 +273,7 @@ def track(ip, store_coords, tracker_event_queue, tracker_control_queue,
 
 
                     requests.get(f"http://{ip[p]}/rr_gcode", params={"gcode": 'M24'}, timeout=5)
-                    statuses, machine_coords = get_status()
+                    statuses, machine_coords = get_status(connection=connection)
                     time.sleep(0.2)
 
 

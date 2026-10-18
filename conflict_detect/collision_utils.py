@@ -80,7 +80,7 @@ def sim_px(p, codes, store_coords, config):
 
         
     for i in codes:
-        targ = Path(rf'C:\Users\nural\python2\group-of-code2\boundaries_store\p{p}\{i}')
+        targ = config.px_fold[p] / i
         with open(targ, 'r') as r:
             line = r.readline().strip()
 
@@ -90,9 +90,7 @@ def sim_px(p, codes, store_coords, config):
 
 
             #line = r.readline().strip()
-            print(line)
             cur_x_sim, cur_y_sim = extract_xy(config, line)
-            print(cur_x_sim, cur_y_sim)
 
         
        

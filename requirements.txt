@@ -1,0 +1,5 @@
+# Versions verified with Python 3.14 on this device.
+numpy==2.5.3
+shapely==2.2.0
+matplotlib==3.11.2
+requests==2.34.2

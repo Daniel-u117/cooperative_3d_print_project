@@ -1,51 +1,78 @@
-import subprocess
-import requests
+"""Connection and telemetry helpers shared by the main process and workers."""
+from dataclasses import dataclass, field
+import math
 import re
 import socket
+import subprocess
 import time
 
-
-# run_netsh("disconnect", f'interface=Wi-Fi') --> this will disrupt the connection on purpose
-
+import requests
 
 
+@dataclass(frozen=True)
+class RobotConnection:
+    printer_1: str = "192.168.0.15"
+    printer_2: str = "192.168.0.16"
+    password: str = field(default="reprap", repr=False)
+    wifi_profile: str | None = None
+    wifi_interface: str = "Wi-Fi"
 
-def get_status(retries=5):
-    url1 = "http://192.168.0.15/rr_status"
-    url2 = "http://192.168.0.16/rr_status"
+    def __post_init__(self):
+        for host in self.ip.values():
+            if not re.fullmatch(r"[A-Za-z0-9.-]+(?::[0-9]{1,5})?", host):
+                raise ValueError("Robot addresses must be hostnames or IPv4 addresses, optionally with a port")
+        if self.printer_1.lower() == self.printer_2.lower():
+            raise ValueError("The two robots must have different addresses")
+
+    @property
+    def ip(self):
+        return {1: self.printer_1, 2: self.printer_2}
+
+
+def connect_robots(connection):
+    """Authenticate both controllers; never upload files or issue movement."""
+    for p, host in connection.ip.items():
+        try:
+            response = requests.get(f"http://{host}/rr_connect",
+                                    params={"password": connection.password}, timeout=5)
+            response.raise_for_status()
+            reply = response.json()
+        except requests.RequestException:
+            raise ConnectionError(f"Cannot connect to robot {p} at {host}") from None
+        if not isinstance(reply, dict) or reply.get("err") != 0:
+            raise ConnectionError(f"Robot {p} at {host} rejected the connection; check its password/session availability")
+
+
+def read_status(connection, *, timeout=5):
+    statuses, coordinates = [], []
+    for p, host in connection.ip.items():
+        response = requests.get(f"http://{host}/rr_status", params={"type": 0}, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        try:
+            status = data["status"]
+            coords = data["coords"]["machine"]
+            valid = isinstance(status, str) and bool(status) and len(coords) >= 2
+            valid = valid and all(math.isfinite(float(value)) for value in coords[:2])
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise ValueError(f"Robot {p} at {host} did not provide status and native coords.machine XY telemetry")
+        statuses.append(status)
+        coordinates.append(coords)
+    return [statuses, coordinates]
+
+
+def get_status(retries=5, connection=None):
+    connection = connection or RobotConnection()
     for attempt in range(retries):
         try:
-            r1 = requests.get(url1, params={"type": 0}, timeout=5)
-            r1.raise_for_status()
-            r2 = requests.get(url2, params={"type": 0}, timeout=5)
-            r2.raise_for_status()
-
-            data1 = r1.json()
-            data2 = r2.json()
-
-            s1 = data1["status"]
-            cm1 = data1["coords"]["machine"]
-            s2 = data2["status"]
-            cm2 = data2["coords"]["machine"]
-
-            if s1 is None or cm1 is None or s2 is None or cm2 is None:
-                continue
-
- 
-            return [[s1, s2],[cm1, cm2]]
-        except (requests.exceptions.RequestException, ConnectionError) as error:
-            print(f'{attempt} attempt to reconnect')
-            rec = reconnect_to_ambots()
-            
-            if rec:
-                continue
-            else:
-                raise
-
-    raise ConnectionError(
-        f"Could not obtain valid status from both printers after {retries} attempts"
-    )
-
+            return read_status(connection)
+        except requests.RequestException:
+            if attempt + 1 == retries:
+                break
+            reconnect_to_ambots(connection=connection)
+    raise ConnectionError(f"Could not obtain status from both robots after {retries} attempts")
 
 
 def run_netsh(*args, timeout=15):
@@ -85,75 +112,33 @@ def tcp_reachable(ip, port, timeout=2):
 
 
 
-def reconnect_to_ambots(max_wait=45):
-    WIFI_SSID = "AMBOTS_5G"
-    WIFI_PROFILE = "AMBOTS_5G"      # usually same as SSID
-    WIFI_INTERFACE = "Wi-Fi"        # check with: netsh wlan show interfaces
+def reconnect_to_ambots(max_wait=45, connection=None):
+    connection = connection or RobotConnection()
+    try:
+        connect_robots(connection)
+        return True
+    except ConnectionError:
+        if not connection.wifi_profile:
+            raise
 
-    PRINTER_IP = "192.168.0.15"
-    PRINTER_PORT = 80
-    state, ssid, _ = current_wifi()
-
-    if state and state.lower() == "connected" and ssid == WIFI_SSID:
-        if tcp_reachable(PRINTER_IP, PRINTER_PORT):
-            con1 = requests.get('http://192.168.0.15/rr_connect?password=reprap', timeout = 0.5)
-
-            con2 = requests.get('http://192.168.0.16/rr_connect?password=reprap', timeout = 0.5)
+    # Change Wi-Fi only when the user explicitly supplies a saved profile.
+    result = run_netsh("connect", f"name={connection.wifi_profile}",
+                       f"interface={connection.wifi_interface}")
+    if result.returncode:
+        raise ConnectionError(f"Could not connect using Wi-Fi profile {connection.wifi_profile}: {result.stdout.strip()} {result.stderr.strip()}")
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        try:
+            connect_robots(connection)
             return True
-
-    print(f"Current Wi-Fi: state={state}, ssid={ssid}")
-    print(f"Reconnecting to {WIFI_SSID}...")
-
-    # Optional: force disconnect first
-    #run_netsh("disconnect", f'interface={WIFI_INTERFACE}')
-
-    
-
-    result = run_netsh(
-        "connect",
-        f"name={WIFI_PROFILE}",
-        f"ssid={WIFI_SSID}",
-        f'interface={WIFI_INTERFACE}'
-    )
-   
-    print("netsh stdout:", result.stdout.strip())
-    print("netsh stderr:", result.stderr.strip())
-    time.sleep(3)
-
-    start = time.perf_counter()
-    dur = 60
-
-    while (state.lower() != "connected" or ssid != WIFI_SSID or not tcp_reachable(PRINTER_IP, PRINTER_PORT)) and (time.perf_counter() - start < dur):
-        print(time.perf_counter() - start<dur)
-        print(state.lower() != 'connected')
-        print(ssid != WIFI_SSID)
-        print(not tcp_reachable(PRINTER_IP, PRINTER_PORT))
-
-        
-        print('another attempt')
-
-        result = run_netsh(
-        "connect",
-        f"name={WIFI_PROFILE}",
-        f"ssid={WIFI_SSID}",
-        f'interface={WIFI_INTERFACE}'
-        )
-        print(f"Waiting... state={state}, ssid={ssid}")
-        time.sleep(3)
-        state, ssid, _ = current_wifi()
-        if state and state.lower() == "connected" and ssid == WIFI_SSID:
-            if tcp_reachable(PRINTER_IP, PRINTER_PORT):
-                print(f"Reconnected to {WIFI_SSID}; printer is reachable.")
-                con1 = requests.get('http://192.168.0.15/rr_connect?password=reprap', timeout = 0.5)
-                con2 = requests.get('http://192.168.0.16/rr_connect?password=reprap', timeout = 0.5)
-                return True
-   
-        print("netsh stdout:", result.stdout.strip())
-        print("netsh stderr:", result.stderr.strip())
-       
-    
-    raise ConnectionError(f"Could not reconnect to {WIFI_SSID} and reach {PRINTER_IP}.")
+        except ConnectionError:
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+    raise ConnectionError(f"Could not reach both robots using Wi-Fi profile {connection.wifi_profile}")
 
 
-# run_netsh("disconnect", f'interface=Wi-Fi') --> this will disrupt the connection on purpose
-
+def check_robot_connection(connection):
+    reconnect_to_ambots(connection=connection)
+    statuses, coordinates = get_status(retries=1, connection=connection)
+    for p, host in connection.ip.items():
+        print(f"Robot {p} ({host}): status={statuses[p - 1]}, machine XY={coordinates[p - 1][:2]}")
+    return statuses, coordinates

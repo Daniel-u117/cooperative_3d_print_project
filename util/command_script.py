@@ -148,7 +148,6 @@ PHYSICAL_BOUNDS = {
 
 
 def pick_command_px(p, printer, store_coords, b, excluded=None):
-    print(b)
     """
     Propose the nearest available command that is not excluded.
     Does not modify availability, coordinates, or exclusions.
@@ -284,7 +283,6 @@ def simulate_candidate(
     )
 
     with open(command, "r") as r:
-        print(command)
         for line_number, line in enumerate(r, start=1):
             if not line.strip():
                 continue
@@ -315,7 +313,6 @@ def simulate_candidate(
                 raise ValueError("Simulation files require printer IDs 1..N")
             x, y = positions[p - 1]
             local_coords[p] = (float(x), float(y))
-            print(f'local_coords: {local_coords}')
 
             cur_x_raw, cur_y_raw = local_coords[p]
 
@@ -383,7 +380,7 @@ def command_script(printer, config, store_coords, tracker_event_queue,
                    execution_finished, error_queue, simulation_queue=None,
                    stage="m", store_polygons = None):
     
-    path = Path(r"C:\Users\nural\python2")
+    path = config.log_dir
     if store_polygons is None:
         raise ValueError("Pass the shared store_polygons dictionary")
 
@@ -394,8 +391,7 @@ def command_script(printer, config, store_coords, tracker_event_queue,
     }
 
     try:
-        ip = {1:'192.168.0.15',
-              2: '192.168.0.16'}
+        printer_ids = set(printer)
 
 
         if stage not in {"b", "m", "e"}:
@@ -417,7 +413,7 @@ def command_script(printer, config, store_coords, tracker_event_queue,
             #any time 'continue' is used it means restart the loop
 
             printers_with_work = {
-                q for q in ip
+                q for q in printer_ids
                 if any(value[0] == "A" for value in printer[q].codes.values())
             }
             print(f'printers with work {printers_with_work}')
@@ -430,7 +426,7 @@ def command_script(printer, config, store_coords, tracker_event_queue,
                 printers_with_work
                 and printers_with_work <= loop_check
                 and not in_flight
-                and set(ip) <= blocked
+                and printer_ids <= blocked
                 ):
                 if recovery_since_progress:
                     raise RuntimeError(
