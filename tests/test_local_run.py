@@ -13,6 +13,25 @@ from util.gcode_input import gcode_files, read_print_points
 
 
 class LocalRunTests(unittest.TestCase):
+    def test_selected_cells_only_are_prepared_and_simulated(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             patch("requests.sessions.Session.request", side_effect=AssertionError("Network access")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            output = Path(temp)
+            report = main(["--headless", "--cells", "1", "4", "7", "--output-dir", str(output)])
+            considered = {item['gcode'] for item in report['accepted']} | set(report['remaining_reachable_regions'])
+            self.assertEqual(considered, {'1.gcode', '4.gcode', '7.gcode'})
+            self.assertEqual({p.name for p in (output / 'processed' / 'p2').glob('*.gcode')},
+                             {f'{cell}_{stage}.gcode' for cell in (1, 4, 7) for stage in ('b', 'm', 'e')})
+
+    def test_missing_selected_cell_fails_before_preparation_or_network(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             patch("requests.sessions.Session.request", side_effect=AssertionError("Network access")), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main(["--mode", "printers", "--cells", "missing", "--output-dir", str(Path(temp) / 'output')])
+            self.assertFalse((Path(temp) / 'output').exists())
+
     def test_missing_marker_fails_instead_of_hanging(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "broken.gcode"

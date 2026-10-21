@@ -20,6 +20,7 @@ import time
 
 TRACK_POSITION_FIELD = "machinePosition"
 WATCH_XY_EPSILON = 0.01  # mm: minimum reported X/Y progress between samples
+WATCH_TIMEOUT = 300.0  # seconds allowed for heating, travel, and extrusion confirmation
 
 
 
@@ -148,12 +149,20 @@ def track(ip, store_coords, tracker_event_queue, tracker_control_queue,
 
 ###############################################################################################################
                 if state[p] == "watch":
+                    watch_deadline = time.monotonic() + WATCH_TIMEOUT
+                    sample_status, raw_position = "unknown", None
                     previous_extruding_sample = None
                     previous_job_file = None
                     previous_extruder_sample = None
                     while not stop_requested.is_set():
+                        if time.monotonic() >= watch_deadline:
+                            raise TimeoutError(
+                                f"p{p}: no moving extrusion confirmed within {WATCH_TIMEOUT:g}s; "
+                                f"last status={sample_status}, position={raw_position}. "
+                                "Job may have finished or failed before confirmation; it was not resent."
+                            )
                         response = requests.get(f"http://{ip[p]}/rr_model?flags=d99fn", timeout=5)
-
+                        response.raise_for_status()
                         sample = response.json()["result"]
                         now = time.monotonic()
                         move = sample["move"]

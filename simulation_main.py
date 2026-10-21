@@ -35,6 +35,7 @@ from conflict_detect.collision_utils import segments_intersect, segment_intersec
 from discretization.file_utils import parse_beg, parse_end, parse_mid
 
 from project_paths import INPUT_DIR, OUTPUT_DIR
+from util.initial_assignments import validate_initial_assignments
 from util.gcode_input import gcode_files, read_print_points
 
 from dataclasses import dataclass, field
@@ -380,6 +381,10 @@ def main(argv=None):
     parser.add_argument("--mode", choices=("simulate", "prepare", "connect", "printers"), default="simulate",
                         help="simulate: offline preview; connect: check robot connections; printers: upload, home, and run robots.")
     parser.add_argument("--input-dir", type=Path, default=INPUT_DIR)
+    parser.add_argument("--cells", nargs="+", metavar="STEM",
+                        help="Use only these input file stems, e.g. --cells 1 4 7")
+    parser.add_argument("--initial-cells", nargs=2, metavar=("P1_CELL", "P2_CELL"),
+                        help="Reserve the first cell for each printer, then wait for both before scheduling more")
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--headless", action="store_true", help="Run local simulation without a plot window")
     parser.add_argument("--printer-1", default="192.168.0.15", help="First robot address")
@@ -404,6 +409,21 @@ def main(argv=None):
     folder = args.input_dir.resolve()
     output_dir = args.output_dir.resolve()
     source_files = gcode_files(folder)
+    if args.cells:
+        selected = set(args.cells)
+        missing = selected - {source.stem for source in source_files}
+        if missing:
+            parser.error(f"Requested cells not found: {', '.join(sorted(missing))}")
+        source_files = [source for source in source_files if source.stem in selected]
+    initial_assignments = {}
+    if args.initial_cells:
+        if len(set(args.initial_cells)) != 2:
+            parser.error("--initial-cells must name two different cells")
+        sources_by_stem = {source.stem: source.name for source in source_files}
+        for p, stem in enumerate(args.initial_cells, start=1):
+            if stem not in sources_by_stem:
+                parser.error(f"Initial cell {stem} is not in the selected input files")
+            initial_assignments[p] = sources_by_stem[stem]
     # Validate all sources before producing any output.
     for source in source_files:
         read_print_points(source)
@@ -725,6 +745,7 @@ def main(argv=None):
 
 
 
+    validate_initial_assignments(printer, initial_assignments)
     print(f"Prepared {len(source_files)} input files in {output_dir}")
     for p, px in printer.items():
         print(f"Printer {p}: {len(px.codes)} reachable regions")
@@ -732,7 +753,7 @@ def main(argv=None):
         return
     if args.mode == "simulate":
         from util.offline_simulation import run_offline
-        return run_offline(printer, config, headless=args.headless)
+        return run_offline(printer, config, headless=args.headless, initial_assignments=initial_assignments)
 
     # Only explicit --mode printers reaches uploads, homing, and live workers.
     statuses, _ = check_robot_connection(connection)
@@ -835,7 +856,7 @@ def main(argv=None):
             execution_request_queue, execution_result_queue,
             tracker_control_queue, printing_queue, stop_requested,
             execution_finished, error_queue, simulation_queue, "m"),
-        kwargs={'store_polygons': store_polygons}
+        kwargs={'store_polygons': store_polygons, 'initial_assignments': initial_assignments}
     )
     track_process.start()
     execution_process.start()

@@ -97,7 +97,8 @@ class RobotConnectionTests(unittest.TestCase):
         requests_queue.put(('1_b.gcode', 2))
 
         def send(url, **kwargs):
-            stop.set()
+            if kwargs['params']['gcode']:
+                stop.set()
             return response({'buff': 100})
 
         with patch('util.execution.get_status', return_value=(['I', 'I'], [[300, 0], [300, 0]])) as status, \
