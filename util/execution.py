@@ -11,7 +11,8 @@ from .network_utils import RobotConnection, get_status, read_status, reconnect_t
 
 
 
-# Native X/Y waypoints, executed one printer and one leg at a time.
+# Native X/Y waypoints for deadlock recovery and the final return after all jobs.
+# Executed one printer and one leg at a time.
 # These configured straight-line routes must have physical clearance.
 # This helper executes the routes; it does not plan collision-free recovery.
 RECOVERY_PLAN = (
@@ -287,11 +288,12 @@ def execution_worker(ip, execution_request_queue, execution_result_queue,
 
             try:
 
-                if filename == "__recover__":
+                if filename in {"__recover__", "__park__"}:
                     if p is not None:
-                        raise ValueError("Recovery request must be (__recover__, None)")
+                        raise ValueError(f"Route request must be ({filename}, None)")
                     observed = recover_printers(ip, stop_requested, connection=connection)
-                    execution_result_queue.put(("recovered", observed))
+                    result = "parked" if filename == "__park__" else "recovered"
+                    execution_result_queue.put((result, observed))
                     continue
 
                 
@@ -340,9 +342,10 @@ def execution_worker(ip, execution_request_queue, execution_result_queue,
                 # The printer might already have received it.
                 stop_requested.set()
                 failure = p
-                if filename == "__recover__":
+                if filename in {"__recover__", "__park__"}:
                     failure = str(exc)
-                    print(f"RECOVERY_FAILED {failure}", flush=True)
+                    label = "FINAL_RETURN_FAILED" if filename == "__park__" else "RECOVERY_FAILED"
+                    print(f"{label} {failure}", flush=True)
                 execution_result_queue.put(("failed", failure))
                 #tracker_control_queue.put(("no print", p))
                 raise

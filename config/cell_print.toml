@@ -1,0 +1,13 @@
+# Settings for converting ordered XY .txt paths into single-layer printer jobs.
+# Edit this file and rerun preparation/simulation/live mode to regenerate G-code.
+# Distances are millimetres, speeds are mm/s, and temperature is degrees Celsius.
+# These settings do not modify existing .gcode inputs.
+
+[cell_print]
+filament_diameter = 2.85
+line_width = 0.44
+layer_height = 0.2       # Printing Z; must be below the fixed Z10 travel clearance.
+nozzle_temperature = 240.0
+print_speed = 20.0
+travel_speed = 60.0
+flow_multiplier = 1.0   # 1.0 = 100% extrusion.

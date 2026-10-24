@@ -63,11 +63,11 @@ class InitialAssignmentTests(unittest.TestCase):
         self.assertEqual(printer[1].codes['4.gcode'][0], 'A')
 
     def test_real_geometry_final_cell_after_both_initial_jobs_and_recovery(self):
-        for drop_marker in (False, True):
-            with self.subTest(drop_marker=drop_marker), tempfile.TemporaryDirectory() as temp:
-                self.exercise_recovery(Path(temp), drop_marker=drop_marker)
+        for drop_marker, completed_early in ((False, False), (True, False), (True, True)):
+            with self.subTest(drop_marker=drop_marker, completed_early=completed_early), tempfile.TemporaryDirectory() as temp:
+                self.exercise_recovery(Path(temp), drop_marker=drop_marker, completed_early=completed_early)
 
-    def exercise_recovery(self, output, *, drop_marker=False):
+    def exercise_recovery(self, output, *, drop_marker=False, completed_early=False):
         captured = {}
 
         def capture(printer, config, **kwargs):
@@ -78,6 +78,9 @@ class InitialAssignmentTests(unittest.TestCase):
             main(['--headless', '--cells', '1', '4', '7', '--initial-cells', '4', '7',
                   '--output-dir', str(output)])
         printer, config = captured['printer'], captured['config']
+        job_tokens = {p: {path.name: path.read_text().splitlines()[-1].split('"')[1]
+                          for path in (output / 'processed' / f'p{p}').glob('*.gcode')}
+                      for p in printer}
         controller = Controller()
         controller.drop_first_marker = drop_marker
         controller.positions = {p: (300.0, 0.0) for p in printer}
@@ -96,6 +99,11 @@ class InitialAssignmentTests(unittest.TestCase):
             if filename == '__recover__':
                 self.assertEqual(completed, {'4', '7'})
                 results.put(('recovered', recover_printers(controller.ip, controller)))
+            elif filename == '__park__':
+                self.assertEqual(completed, {'1', '4', '7'})
+                self.assertFalse(controller.is_set())
+                finished.set.assert_not_called()
+                results.put(('parked', recover_printers(controller.ip, controller)))
             else:
                 stem = filename.split('_')[0]
                 if stem == '1':
@@ -105,16 +113,17 @@ class InitialAssignmentTests(unittest.TestCase):
                 results.put(('sent', p))
 
         def control(item):
-            action, p = item
+            action, p, *details = item
             if action == 'retry':
                 events.put((p, 'free'))
             elif action == 'print':
+                self.assertEqual(details[0]['token'], job_tokens[p][details[0]['file']])
                 stem = active[p]
                 # Model final telemetry from the G-code endpoint, not the sampled boundary.
                 coords[p] = read_print_points(output / 'transformed' / f'p{p}' / f'{stem}.gcode')[-1]
                 controller.positions[p] = coords[p]
                 footprints[p] = polygon_at_position(p, printer, coords[p])
-                printing.put(('Is printing', p))
+                printing.put(('Completed' if completed_early else 'Is printing', p))
                 events.put((p, 'free'))
 
         original_get = events.get
@@ -132,14 +141,15 @@ class InitialAssignmentTests(unittest.TestCase):
         with controller_io(controller):
             command_script(printer, config, coords, events, CallbackQueue(execute), results,
                            CallbackQueue(control), printing, controller, finished, errors,
-                           store_polygons=footprints, initial_assignments=captured['initial'])
+                           store_polygons=footprints, initial_assignments=captured['initial'], job_tokens=job_tokens)
         log = (output / 'order.txt').read_text()
         self.assertEqual(submissions, [('4_b.gcode', 1), ('7_b.gcode', 2),
-                                       ('__recover__', None), ('1_m.gcode', 1)])
+                                       ('__recover__', None), ('1_m.gcode', 1), ('__park__', None)])
         self.assertLess(log.index('initial assignments complete'), log.index('candidate p1:1.gcode'))
         self.assertIn('reject p1:1.gcode', log)
         self.assertIn('reject p2:1.gcode', log)
         self.assertIn('recovered: observed positions=', log)
+        self.assertIn('final return complete: observed positions=', log)
         self.assertTrue(errors.empty())
         self.assertTrue(controller.is_set())
         finished.set.assert_called_once()

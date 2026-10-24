@@ -201,9 +201,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(set(controller.moves), {1})
 
     def test_worker_forwards_recovery_error_to_scheduler(self):
+        for request, label in (('__recover__', 'RECOVERY_FAILED'), ('__park__', 'FINAL_RETURN_FAILED')):
+            with self.subTest(request=request):
+                self.check_worker_route_failure(request, label)
+
+    def check_worker_route_failure(self, request, label):
         controller = Controller()
         pending, results, controls, errors = (queue.Queue() for _ in range(4))
-        pending.put(('__recover__', None))
+        pending.put((request, None))
         detail = 'completion acknowledgement missing after retry: marker=False'
         with patch('util.execution.recover_printers', side_effect=TimeoutError(detail)):
             with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -211,8 +216,30 @@ class RecoveryTests(unittest.TestCase):
                     execution_worker(controller.ip, pending, results, controls, controller, errors)
         self.assertEqual(results.get_nowait(), ('failed', detail))
         self.assertTrue(controller.is_set())
-        self.assertIn('RECOVERY_FAILED', output.getvalue())
+        self.assertIn(label, output.getvalue())
         self.assertIn(detail, errors.get_nowait()[1])
+
+    def test_final_return_worker_uses_configured_waypoints_and_waits_for_both(self):
+        controller = Controller()
+        pending, controls, errors = (queue.Queue() for _ in range(3))
+        pending.put(('__park__', None))
+        received = []
+        plan = ((1, ((260.0, 35.0), (275.0, 25.0))), (2, ((270.0, 30.0),)))
+
+        def complete(item):
+            self.assertFalse(controller.is_set())
+            self.assertEqual(controller.status(None)[0], ['I', 'I'])
+            received.append(item)
+            controller.set()
+
+        with controller_io(controller), patch('util.execution.RECOVERY_PLAN', plan):
+            execution_worker(controller.ip, pending, CallbackQueue(complete), controls,
+                             controller, errors)
+        self.assertEqual(received, [('parked', {1: (275.0, 25.0), 2: (270.0, 30.0)})])
+        moves = [(p, command) for p, command, _ in controller.commands if command.startswith('G53 G1 ')]
+        self.assertEqual([p for p, _ in moves], [1, 1, 2])
+        self.assertIn('X260.000000 Y35.000000', moves[0][1])
+        self.assertTrue(errors.empty())
 
     def test_wrong_position_does_not_release_second_robot(self):
         controller = Controller()
@@ -287,6 +314,8 @@ class SchedulerRecoveryTests(unittest.TestCase):
                 observed = recover_printers(controller.ip, controller)
                 recovered = True
                 results.put(('recovered', observed))
+            elif filename == '__park__':
+                results.put(('parked', recover_printers(controller.ip, controller)))
             else:
                 results.put(('sent', p))
 
@@ -321,7 +350,8 @@ class SchedulerRecoveryTests(unittest.TestCase):
                            CallbackQueue(execute), results, CallbackQueue(control), printing,
                            controller, finished, errors, store_polygons=footprints)
             log = (Path(temp) / 'order.txt').read_text()
-        self.assertEqual(submissions, [('4_b.gcode', 2), ('__recover__', None), ('1_m.gcode', 2)])
+        self.assertEqual(submissions, [('4_b.gcode', 2), ('__recover__', None),
+                                       ('1_m.gcode', 2), ('__park__', None)])
         self.assertIn('recovered: observed positions=', log)
         self.assertTrue(errors.empty())
         self.assertTrue(controller.is_set())

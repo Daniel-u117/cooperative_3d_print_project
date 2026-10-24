@@ -379,7 +379,7 @@ def command_script(printer, config, store_coords, tracker_event_queue,
                    execution_request_queue, execution_result_queue,
                    tracker_control_queue, printing_queue, stop_requested,
                    execution_finished, error_queue, simulation_queue=None,
-                   stage="m", store_polygons = None, initial_assignments=None):
+                   stage="m", store_polygons = None, initial_assignments=None, job_tokens=None):
     
     path = config.log_dir
     if store_polygons is None:
@@ -424,6 +424,34 @@ def command_script(printer, config, store_coords, tracker_event_queue,
             print(f'printers with work {printers_with_work}')
 
             if not printers_with_work and not in_flight:
+                print("FINAL_RETURN_START all jobs complete; requesting RECOVERY_PLAN", flush=True)
+                with open(path / "order.txt", "a") as out:
+                    out.write("all jobs complete: requesting final return via RECOVERY_PLAN\n")
+                execution_request_queue.put(("__park__", None))
+                deadline = time.monotonic() + RECOVERY_TIMEOUT + 10.0
+                while not stop_requested.is_set():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Execution worker did not complete final return")
+                    try:
+                        result, observed = execution_result_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if result != "parked":
+                        raise RuntimeError(f"Final return failed: {(result, observed)}")
+                    if not isinstance(observed, dict) or set(observed) != printer_ids:
+                        raise RuntimeError("Final return did not return all printer positions")
+                    positions = {q: tuple(map(float, observed[q])) for q in printer}
+                    footprints = {
+                        q: polygon_at_position(q, printer, positions[q]) for q in printer
+                    }
+                    store_coords.update(positions)
+                    store_polygons.update(footprints)
+                    print(f"FINAL_RETURN_DONE observed={positions}", flush=True)
+                    with open(path / "order.txt", "a") as out:
+                        out.write(f"final return complete: observed positions={positions}\n")
+                    break
+                if stop_requested.is_set():
+                    return
                 stop_requested.set()
                 break
             ####this if branch is supposed to deal with loop check
@@ -722,23 +750,30 @@ def command_script(printer, config, store_coords, tracker_event_queue,
                 #but we will see, shouldn't be much of a difference because either way
                 #the tracker watches only after the execution command is sent
 
-                tracker_control_queue.put(("print", p))
+                if job_tokens is None:
+                    tracker_control_queue.put(("print", p))
+                else:
+                    tracker_control_queue.put(("print", p, {
+                        "file": filename, "token": job_tokens[p][filename],
+                    }))
 
                 while not stop_requested.is_set():
                     try:
                         result, response_p = printing_queue.get(timeout=0.2)
                     except queue.Empty:
                         continue
-                    if (result, response_p) != ("Is printing", p):
-                        raise RuntimeError(f"Unexpected printing message: {(result, response_p)} instead of {("Is printing", p)}")
+                    if response_p != p or result not in {"Is printing", "Completed"}:
+                        raise RuntimeError(f"Unexpected job acknowledgement: {(result, response_p)}; expected Is printing or Completed for p{p}")
 
 
                     print(
-                        f"PRINT_ACK t={time.monotonic():.6f} p={p} file={filename} "
+                        f"PRINT_ACK t={time.monotonic():.6f} p={p} file={filename} result={result!r} "
                         f"stored_now={store_coords.copy()}", flush=True,
                     )
                     
                     
+                    with open(path / "order.txt", "a") as out:
+                        out.write(f"job acknowledgement p{p}:{filename}; result={result}\n")
                     count[p] += 1
                     print(count)
                     break

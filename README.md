@@ -8,7 +8,7 @@ Its current Python installation already has those packages and Tk for plotting.
 python simulation_main.py
 ```
 
-This prepares the G-code in [ulti_maker](ulti_maker), runs a finite local candidate
+This prepares the G-code in [input/ulti_maker](input/ulti_maker), runs a finite local candidate
 simulation, and opens an animated preview. Close the plot window to exit. Default
 mode makes no printer requests and does not change Wi-Fi. You do not need to run
 [polygon_construction.py](polygon_construction.py) first.
@@ -51,13 +51,16 @@ launched from another working directory. Override them when needed:
 python simulation_main.py --input-dir "D:\My Gcode" --output-dir "D:\Simulation Results" --headless
 ```
 
-Input files must be Cura-style `.gcode` files containing an `M107` marker followed
-by XY motion forming a non-degenerate polygon. Files without that marker now fail
-with a message instead of hanging. Original source files are preserved. Generated
-data lives under `output/` by default:
+Input folders can contain Cura-style `.gcode` files, ordered XY `.txt` cell paths,
+or both. Existing G-code must contain an `M107` marker followed by XY motion forming
+a non-degenerate polygon. Text paths are converted automatically before the usual
+preparation steps (see below). Files with the same cell stem, such as `01.txt` and
+`01.gcode`, are rejected to avoid ambiguous assignments and output overwrites.
+Original source files are preserved. Generated data lives under `output/` by default:
 
 | Location | Contents |
 | --- | --- |
+| `converted/` | G-code converted from selected text paths, in the original layout frame |
 | `transformed/p1`, `transformed/p2` | G-code in each printer's coordinate frame |
 | `boundaries_store/p1`, `boundaries_store/p2` | Sampled region boundaries |
 | `processed/p1`, `processed/p2` | Beginning, middle, and end G-code variants |
@@ -75,6 +78,114 @@ collision calculation. It stops when no candidate can be accepted; blocked regio
 are reported rather than retried forever. This is a sequential geometric preview,
 not a reproduction of concurrent motion, extrusion timing, or live recovery.
 The 13 supplied files produced 8 accepted regions and 5 blocked regions in testing.
+
+## Convert text cell paths
+
+The supplied [input/cells_spiral](input/cells_spiral) folder contains 20 ordered
+XY paths. Each `.txt` file is one continuous, single-layer cell in millimetres,
+in the same layout coordinate frame used by the original G-code inputs:
+
+```text
+147.93469 116.25000
+140.57487 129.67491
+128.14112 129.45573
+```
+
+Every data row must contain exactly two finite numbers separated by whitespace.
+Blank lines and comments beginning with `#` or `;` are accepted. At least three
+distinct points spanning a nonzero area are required for the existing geometry
+pipeline. Point order is preserved: every consecutive segment is extruded, and no
+closing segment, infill, skirt, or additional layer is invented. Blank lines do not
+split the file into separate paths. Units and the coordinate frame are not inferred.
+
+Prepare converted G-code, per-printer transforms, boundaries, and job variants:
+
+```powershell
+python simulation_main.py --mode prepare --input-dir input/cells_spiral --output-dir output/spiral
+```
+
+Run the local geometric preview with the same input:
+
+```powershell
+python simulation_main.py --input-dir input/cells_spiral --output-dir output/spiral-preview --headless
+```
+
+Select files by their exact stems, including leading zeros:
+
+```powershell
+python simulation_main.py --mode prepare --input-dir input/cells_spiral --cells 01 04 07 --output-dir output/spiral-selected
+```
+
+`--initial-cells` also accepts text-file stems and maps them to the converted job
+names, for example `04` becomes `04.gcode`. Existing `.gcode` inputs continue through
+the same pipeline without conversion. The default input directory is now
+[input/ulti_maker](input/ulti_maker), matching the relocated source files.
+
+The text files supply no printing parameters. Edit
+[config/cell_print.toml](config/cell_print.toml) to set them; the program rereads this
+file each time it converts text inputs. The default file is located relative to the
+project, so it also works when launched from another working directory. Rerun
+preparation or live mode after an edit to regenerate the G-code. Existing `.gcode`
+inputs are not changed by these settings.
+
+```toml
+[cell_print]
+filament_diameter = 2.85
+line_width = 0.44
+layer_height = 0.2
+nozzle_temperature = 240.0
+print_speed = 20.0
+travel_speed = 60.0
+flow_multiplier = 1.0
+```
+
+Distances are in mm, speeds in mm/s, and temperature in degrees Celsius.
+`flow_multiplier = 1.0` means 100% extrusion. These are editable starting values;
+match them to the installed filament, nozzle, and material before a live run.
+All values must be finite positive numbers, and layer height must be below the
+pipeline's fixed Z10 travel clearance. Missing keys, unknown keys, invalid types,
+and malformed or missing configuration files stop text conversion before output
+or robot access. The file is not needed for G-code-only runs or connection checks.
+
+To keep several profiles, copy the file and select a different one:
+
+```powershell
+python simulation_main.py --mode prepare --input-dir input/cells_spiral --output-dir output/spiral --cell-config config/my_material.toml
+```
+
+For a temporary override, the existing `--txt-filament-diameter`, `--txt-line-width`,
+`--txt-layer-height`, `--txt-nozzle-temperature`, `--txt-print-speed`,
+`--txt-travel-speed`, and `--txt-flow-multiplier` options take precedence over values
+in the selected file. They do not modify the file. For example:
+
+```powershell
+python simulation_main.py --mode prepare --input-dir input/cells_spiral --output-dir output/spiral --txt-nozzle-temperature 210
+```
+
+Extrusion is calculated using a rectangular bead approximation:
+`E increment = segment length * line width * layer height * flow / (pi * (filament diameter / 2)^2)`.
+Speeds are converted from mm/s to G-code feed rates in mm/min. Each cell establishes
+millimetres, absolute XYZ and absolute extrusion, resets E to zero, and waits for
+its nozzle temperature. It travels at Z10 to the first XY point, lowers to the
+layer height, then extrudes along the remaining points. It uses the existing
+`M107`, `;LAYER:0`, and `;TIME_ELAPSED` markers so the beginning/middle/end split
+works. The time comment estimates extrusion-path time only. Setup remains in each
+job variant, including middle jobs, to avoid inheriting another cell's E position.
+Beginning and middle jobs finish at Z10; end jobs also wait for motion and turn off
+the nozzle. No bed heating, automatic priming/retraction, or per-cell homing is added.
+
+Converted files in `output/spiral/converted/` are in the common layout frame.
+The live workflow uses the transformed and processed files under `processed/p1`
+and `processed/p2`. To run after verifying the profile, use the same conversion
+options with `--mode printers` instead of `--mode prepare`; that command uploads,
+homes, and executes on the robots. Conversion and automated validation have been
+tested on all 20 supplied paths; physical printing of these new paths has not been
+tested by the assistant.
+
+The reusable converter is [convert_cell_path](util/cell_paths.py), with settings
+loaded from the same configuration file unless an explicit `CellPrintSettings`
+object is supplied. Automated conversion tests are in
+[test_cell_paths.py](tests/test_cell_paths.py).
 
 ## Connect and run on the robots
 
@@ -148,7 +259,7 @@ it does not send an emergency stop to a robot already executing an uploaded file
 
 ### Reproduce the final-cell recovery with cells 1, 4, and 7
 
-Select a small input set without removing files from [ulti_maker](ulti_maker):
+Select a small input set without removing files from [input/ulti_maker](input/ulti_maker):
 
 ```powershell
 .\.venv\Scripts\python.exe simulation_main.py --cells 1 4 7 --initial-cells 4 7 --headless --output-dir output/recovery-preview
@@ -213,10 +324,85 @@ during recovery. Increasing position tolerance cannot repair a missing reply.
 
 The run's `order.txt` records fixed initial assignments, the end of the initial phase,
 each candidate's starting positions and collision result, execution choices, recovery completion, and
-scheduler failures. If a submitted job never confirms extrusion while moving,
-tracking now reports an error after 300 seconds (`WATCH_TIMEOUT` in
-[tracking.py](util/tracking.py)) instead of waiting indefinitely. Error shutdown
-stops the software workers; it does not cancel a command already on a robot.
+scheduler failures. Tracking allows 300 seconds to confirm moving extrusion or
+verified completion (`WATCH_TIMEOUT` in [tracking.py](util/tracking.py)). Error
+shutdown stops the software workers; it does not cancel a command already on a robot.
+
+### Job tracking and short-job completion (2026-10-23)
+
+The spiral experiment exposed a separate tracking stall: printer 1 was idle at
+cell 12's final XY position, but the tracker was still waiting for consecutive
+samples of moving extrusion. The scheduler was waiting for that acknowledgement
+and still counted the job as in flight, so the recovery condition was never reached.
+
+Tracking now polls each printer once per pass with independent job state and
+timeouts. Waiting for printer 1's start or completion does not prevent polling
+printer 2, consuming control messages, or updating visualization. HTTP requests
+remain bounded; there is no inner loop waiting for one printer to start extruding.
+
+Every prepared printer-specific beginning/middle/end job receives a fresh token.
+The job writes `global.ambotJobStarted` at its start and writes the same token to
+`global.ambotJobDone` only after its final `M400` motion barrier. The tracker reads
+the global variables through `rr_model` and then reads fresh machine status.
+These variables remain readable after completion and do not consume `rr_reply`,
+which remains available to homing and recovery. This requires RepRapFirmware
+support for [G-code global variables and meta commands](https://docs.duet3d.com/User_manual/Reference/Gcode_meta_commands)
+and the `global` object-model query. Tokens differ between preparation runs,
+printers, and file variants, so a previous job's token cannot complete the new job.
+
+Normal moving-extrusion confirmation still releases the scheduler's start wait.
+If that sampling window is missed, matching start/completion tokens plus idle
+status instead produce a `Completed` acknowledgement. Final coordinates and
+footprints are published before that acknowledgement and the subsequent free
+notification. The scheduler can then remove the job from its in-flight set,
+consider remaining cells, and invoke recovery if the normal collision-blocked
+conditions hold. An idle robot alone or a stale completion token is insufficient.
+A full event queue is retried without sending duplicate acknowledgements.
+
+A started job that stays idle without its matching completion token for 10 seconds
+stops with a diagnostic instead of being assumed successful; it may have failed or
+been cancelled. A job with no moving-extrusion or completion confirmation stops
+after 300 seconds. Polling does not restart jobs or automatically resume paused
+robots. No completion is inferred from the final XY position or E value alone.
+
+Watch for `JOB_WATCH`, `JOB_SAMPLE`, and `JOB_COMPLETE`. Samples print when status
+or token state changes and otherwise at five-second intervals. `JOB_COMPLETE`
+includes `printing_sample_missed=True` when the completion path released a missed
+start acknowledgement. `PRINT_ACK` and the order log identify whether the scheduler
+received `Is printing` or `Completed`.
+
+**Regenerate and upload the jobs through the updated live workflow.** Old uploaded
+files do not contain completion tokens. The normal command performs preparation
+and upload automatically before homing and execution:
+
+```powershell
+python simulation_main.py --mode printers --input-dir input/cells_spiral --output-dir output/spiral
+```
+
+The fix is validated with simulated controller responses, including missed printing
+samples, stale/missing tokens, a busy peer, queue backpressure, and the final-cell
+recovery sequence. It has not yet been validated on physical robots.
+
+### Automatic return after all jobs finish
+
+In live printer mode, once no available jobs remain and tracking has confirmed
+completion of every dispatched job, both printers automatically follow
+`RECOVERY_PLAN` in [execution.py](util/execution.py). This uses the same configured
+waypoints, order, feedrate, timeout, and arrival checks as deadlock recovery.
+The current plan returns printer 1 and then printer 2 to machine XY `(275, 25)`.
+Editing that plan changes both recovery and the final return destinations.
+
+The scheduler keeps the workers running until both routes have completed,
+refreshes the stored positions and footprints, and then ends the run. The console
+shows `FINAL_RETURN_START`, the existing per-printer `RECOVERY_*` progress messages,
+and `FINAL_RETURN_DONE` only after verified arrival. A route failure produces
+`FINAL_RETURN_FAILED` and stops the run with an error. [order.txt](output/order.txt)
+in the selected output directory records the final return request and result.
+Cancellation or an earlier job error does not initiate this return. Offline
+simulation and prepare mode do not move the printers.
+
+Automated tests cover completion ordering, changed waypoints, verified arrival,
+and failure/timeout handling. The final return still needs a physical-printer run.
 
 ### Confirmed recovery fix (2026-10-21)
 
@@ -255,14 +441,14 @@ verified on 2026-10-21. Later upstream changes are outside this comparison.
 
 | Area | Changes in this version |
 | --- | --- |
-| Portable paths and setup | Replaced machine-specific input/output paths with [project_paths.py](project_paths.py), project-local [ulti_maker](ulti_maker) inputs, and an overridable output directory. Added dependency pins, virtual-environment instructions, and generated-output ignore rules. |
+| Portable paths and setup | Replaced machine-specific input/output paths with [project_paths.py](project_paths.py), project-local [input/ulti_maker](input/ulti_maker) inputs, and an overridable output directory. Added dependency pins, virtual-environment instructions, and generated-output ignore rules. |
 | Local execution | Added explicit `simulate`, `prepare`, `connect`, and `printers` modes. The default is an offline, finite geometric preview with an optional headless run and a JSON report. Only explicit live mode uploads, homes, and runs the robots. |
 | Preparation and input handling | Unified preparation through [simulation_main.py](simulation_main.py), with [polygon_construction.py](polygon_construction.py) as a compatibility entry point. Added clear failures for missing/invalid inputs and missing `M107`, handled blank lines and modal XY coordinates, preserved source inputs, and excluded stale generated files from current runs. |
 | Robot connections | Added configurable robot addresses, an environment-variable password override, connection-only checks, validated native telemetry, upload error checks, and an optional saved Wi-Fi profile. The same connection settings are passed to spawned workers. |
 | Homing completion | Replaced the original fixed 45-second sleeps with sequential `G28`, `M400`, and a unique completion reply, plus idle checks, bounded requests, progress output, and a configurable per-robot timeout. |
 | Repeatable scheduling experiments | Added `--cells` and `--initial-cells`. Initial cells are reserved per printer and checked for validity, reachability, and collisions. Both seeded jobs must finish before the remaining cells are considered. Candidate poses and collision decisions are logged. |
 | Recovery and command delivery | Added buffer-capacity checks and complete-line submission for recovery and job starts. Updated the parking targets and machine-coordinate commands, retained received markers, required both robots idle, added the bounded acknowledgement retry, and improved failure diagnostics as described above. |
-| Tracking and validation | Added bounded HTTP requests and a 300-second limit for confirming moving extrusion. Added automated input, offline, connection, homing, tracking, scheduling, and recovery regressions. |
+| Tracking and validation | Added bounded HTTP requests, independent per-printer polling, persistent job-completion tokens, and a 300-second limit for confirming moving extrusion or completion. Added automated input, offline, connection, homing, tracking, scheduling, and recovery regressions. |
 
 The original project already supplied the robot geometry, kinematics, collision
 checking, live worker/queue structure, moving-extrusion detection, and blocked-work

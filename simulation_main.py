@@ -23,10 +23,11 @@ from pathlib import Path
 import random
 from matplotlib.ticker import FuncFormatter
 from matplotlib.patches import Circle
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from util.network_utils import RobotConnection, check_robot_connection
 from util.homing import home_robots
+from util.job_tracking import instrument_job
 from kinematics.animation import inverse_kinematic, animation_script, machine1_to_plot, machine2_to_plot, closest_point_on_segment
 from util.tracking import track
 from util.command_script import command_script, polygon_at_position
@@ -34,9 +35,10 @@ from util.execution import execution_worker
 from conflict_detect.collision_utils import segments_intersect, segment_intersects_circle, point_in_quad, rectangles_intersect, extract_xy, xy_points_after_m107, write_sim_file, sim_one_px, sim_px
 from discretization.file_utils import parse_beg, parse_end, parse_mid
 
-from project_paths import INPUT_DIR, OUTPUT_DIR
+from project_paths import INPUT_DIR, OUTPUT_DIR, CELL_PRINT_CONFIG
 from util.initial_assignments import validate_initial_assignments
-from util.gcode_input import gcode_files, read_print_points
+from util.gcode_input import cell_input_files, read_print_points
+from util.cell_paths import load_cell_settings, read_cell_points, cell_gcode
 
 from dataclasses import dataclass, field
 import numpy as np
@@ -393,6 +395,15 @@ def main(argv=None):
     parser.add_argument("--wifi-interface", default="Wi-Fi")
     parser.add_argument("--homing-timeout", type=float, default=180.0,
                         help="Maximum homing wait per robot in seconds (default: 180)")
+    parser.add_argument("--cell-config", type=Path, default=CELL_PRINT_CONFIG,
+                        help="Text-path printing configuration (default: config/cell_print.toml in the project)")
+    for name, unit in (("filament_diameter", "mm"), ("line_width", "mm"),
+                       ("layer_height", "mm"), ("nozzle_temperature", "C"),
+                       ("print_speed", "mm/s"), ("travel_speed", "mm/s"),
+                       ("flow_multiplier", "ratio")):
+        parser.add_argument("--txt-" + name.replace("_", "-"), type=float,
+                            default=None,
+                            help=f"Override the cell configuration {name} for this run ({unit})")
     args = parser.parse_args(argv)
     if not math.isfinite(args.homing_timeout) or args.homing_timeout <= 0:
         parser.error("--homing-timeout must be a finite positive number")
@@ -408,7 +419,7 @@ def main(argv=None):
         parser.error("--headless is supported only for local simulation or preparation")
     folder = args.input_dir.resolve()
     output_dir = args.output_dir.resolve()
-    source_files = gcode_files(folder)
+    source_files = cell_input_files(folder)
     if args.cells:
         selected = set(args.cells)
         missing = selected - {source.stem for source in source_files}
@@ -419,15 +430,43 @@ def main(argv=None):
     if args.initial_cells:
         if len(set(args.initial_cells)) != 2:
             parser.error("--initial-cells must name two different cells")
-        sources_by_stem = {source.stem: source.name for source in source_files}
+        sources_by_stem = {source.stem: (source.stem + ".gcode" if source.suffix.lower() == ".txt"
+                                      else source.name) for source in source_files}
         for p, stem in enumerate(args.initial_cells, start=1):
             if stem not in sources_by_stem:
                 parser.error(f"Initial cell {stem} is not in the selected input files")
             initial_assignments[p] = sources_by_stem[stem]
-    # Validate all sources before producing any output.
+    # Validate every selected source and render text paths before writing output.
+    text_sources = [source for source in source_files if source.suffix.lower() == ".txt"]
+    converted = {}
+    if text_sources:
+        settings = load_cell_settings(args.cell_config)
+        overrides = {
+            name: getattr(args, "txt_" + name) for name in (
+                "filament_diameter", "line_width", "layer_height", "nozzle_temperature",
+                "print_speed", "travel_speed", "flow_multiplier")
+            if getattr(args, "txt_" + name) is not None
+        }
+        settings = replace(settings, **overrides)
+        print(f"Text conversion configuration: {args.cell_config.resolve()}")
+        for source in text_sources:
+            converted[source] = cell_gcode(read_cell_points(source), settings, source_name=source.name)
     for source in source_files:
-        read_print_points(source)
+        if source not in converted:
+            read_print_points(source)
+    converted_dir = output_dir / "converted"
+    for source in text_sources:
+        destination = converted_dir / (source.stem + ".gcode")
+        if destination.resolve() in {item.resolve() for item in source_files}:
+            raise ValueError(f"Conversion would overwrite an input: {destination}")
     output_dir.mkdir(parents=True, exist_ok=True)
+    if converted:
+        converted_dir.mkdir(parents=True, exist_ok=True)
+        for source, text in converted.items():
+            (converted_dir / (source.stem + ".gcode")).write_text(text, encoding="utf-8")
+        source_files = [converted_dir / (source.stem + ".gcode") if source in converted else source
+                        for source in source_files]
+        print(f"Converted {len(converted)} text cell paths into {converted_dir}")
     transformed_dir = output_dir / "transformed"
     prox_join2 = np.array([151.16978, -53.04552])
     length_a2 = 225.39945
@@ -680,6 +719,7 @@ def main(argv=None):
 
 
     target_fold = {p: output_dir / "processed" / f"p{p}" for p in printer}
+    job_tokens = {p: {} for p in printer}
     for p, target in target_fold.items():
         target.mkdir(parents=True, exist_ok=True)
         for source in source_files:
@@ -687,6 +727,9 @@ def main(argv=None):
             parse_beg(transformed, target)
             parse_mid(transformed, target)
             parse_end(transformed, target)
+            for stage in ("b", "m", "e"):
+                job_name = f"{source.stem}_{stage}.gcode"
+                job_tokens[p][job_name] = instrument_job(target / job_name)
 
     ip = connection.ip
 
@@ -856,7 +899,8 @@ def main(argv=None):
             execution_request_queue, execution_result_queue,
             tracker_control_queue, printing_queue, stop_requested,
             execution_finished, error_queue, simulation_queue, "m"),
-        kwargs={'store_polygons': store_polygons, 'initial_assignments': initial_assignments}
+        kwargs={'store_polygons': store_polygons, 'initial_assignments': initial_assignments,
+                'job_tokens': job_tokens}
     )
     track_process.start()
     execution_process.start()

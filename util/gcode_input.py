@@ -6,15 +6,30 @@ COORDINATE = {axis: re.compile(rf"\b{axis}\s*(-?(?:\d+(?:\.\d*)?|\.\d+))")
               for axis in ("X", "Y")}
 
 
-def gcode_files(folder):
+def _input_files(folder, suffixes):
     folder = Path(folder)
     if not folder.is_dir():
         raise ValueError(f"Input directory does not exist: {folder}")
     files = sorted((p for p in folder.iterdir()
-                    if p.is_file() and p.suffix.lower() == ".gcode"),
+                    if p.is_file() and p.suffix.lower() in suffixes),
                    key=lambda p: (int(p.stem) if p.stem.isdigit() else float("inf"), p.name))
     if not files:
-        raise ValueError(f"No .gcode files found in {folder}")
+        raise ValueError(f"No {' or '.join(suffixes)} files found in {folder}")
+    return files
+
+
+def gcode_files(folder):
+    return _input_files(folder, (".gcode",))
+
+
+def cell_input_files(folder):
+    files = _input_files(folder, (".gcode", ".txt"))
+    names = {}
+    for source in files:
+        key = source.stem.casefold()
+        if key in names:
+            raise ValueError(f"Duplicate cell stem: {names[key].name} and {source.name}")
+        names[key] = source
     return files
 
 
